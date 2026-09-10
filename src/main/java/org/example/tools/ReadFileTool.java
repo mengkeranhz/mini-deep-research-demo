@@ -12,6 +12,8 @@ import org.example.ToolRegistry.AgentTool;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -19,9 +21,11 @@ import java.util.Map;
 public class ReadFileTool implements AgentTool {
 
     private final Path root;
+    private final int maxResults;
 
-    public ReadFileTool(Config.Storage storage) {
+    public ReadFileTool(Config.Storage storage, Config.ReadFile readFile) {
         this.root = Config.rootDir(storage);
+        this.maxResults = Math.max(1, readFile.maxResults());
     }
 
     @Override
@@ -32,7 +36,7 @@ public class ReadFileTool implements AgentTool {
     @Override
     public ToolDef definition() {
         return new ToolDef(name(), "按行读取本地文件（fetch_url 保存的 Markdown、PDF 等），返回指定范围的行。"
-                        + "文件较长时可多次调用翻页阅读；提供 keywords 时改为返回命中关键词的行。",
+                        + "文件较长时可多次调用翻页阅读；提供 keywords 时改为按段落检索，返回命中关键词的完整段落。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "path", Map.of("type", "string", "description", "文件路径（相对路径相对于根目录解析）"),
@@ -40,7 +44,7 @@ public class ReadFileTool implements AgentTool {
                                 "limit", Map.of("type", "integer", "description", "返回行数，默认 200"),
                                 "keywords", Map.of("type", "array",
                                         "items", Map.of("type", "string"),
-                                        "description", "关键词列表，命中任意一个即返回该行（忽略 offset/limit）")),
+                                        "description", "关键词列表，返回命中这些关键词的完整段落（命中关键词更多的段落优先）")),
                         "required", List.of("path")));
     }
 
@@ -53,7 +57,7 @@ public class ReadFileTool implements AgentTool {
                 ? ToolRegistry.strList(input, "keywords").stream().filter(k -> !k.isBlank()).toList()
                 : List.of();
         if (!keywords.isEmpty()) {
-            return searchByKeywords(path, lines, keywords);
+            return searchByKeywords(path, lines, keywords, maxResults);
         }
 
         int offset = ToolRegistry.optInt(input, "offset", 0);
@@ -68,33 +72,54 @@ public class ReadFileTool implements AgentTool {
         return sb.toString();
     }
 
-    /** 返回命中任意关键词的行（不区分大小写）。 */
-    private String searchByKeywords(String path, List<String> lines, List<String> keywords) {
+    /** 按空行分段检索：返回命中关键词的完整段落，命中关键词更多的段落优先，最多返回 maxResults 段。 */
+    private String searchByKeywords(String path, List<String> lines, List<String> keywords, int maxResults) {
         List<String> lowerKeywords = keywords.stream().map(String::toLowerCase).toList();
-        StringBuilder sb = new StringBuilder("文件 ").append(path).append(" 命中关键词 ").append(keywords).append(" 的行:\n");
-        int hit = 0;
-        for (int i = 0; i < lines.size(); i++) {
-            String line = lines.get(i);
-            if (containsAny(line, lowerKeywords)) {
-                sb.append(i).append(": ").append(line).append('\n');
-                hit++;
+        List<Hit> hits = new ArrayList<>();
+        int i = 0;
+        while (i < lines.size()) {
+            while (i < lines.size() && lines.get(i).isBlank()) {
+                i++;
+            }
+            if (i >= lines.size()) {
+                break;
+            }
+            int start = i;
+            StringBuilder text = new StringBuilder();
+            while (i < lines.size() && !lines.get(i).isBlank()) {
+                text.append(lines.get(i)).append('\n');
+                i++;
+            }
+            int end = i - 1;
+            String lower = text.toString().toLowerCase();
+            int count = 0;
+            for (String kw : lowerKeywords) {
+                if (lower.contains(kw)) {
+                    count++;
+                }
+            }
+            if (count > 0) {
+                hits.add(new Hit(start, end, text.toString(), count));
             }
         }
-        if (hit == 0) {
+        if (hits.isEmpty()) {
             return "文件 " + path + " 中没有命中关键词 " + keywords + " 的内容。";
+        }
+        hits.sort(Comparator.comparingInt(Hit::keywordCount).reversed()
+                .thenComparingInt(Hit::start));
+        int show = Math.min(maxResults, hits.size());
+        StringBuilder sb = new StringBuilder("文件 ").append(path).append(" 命中关键词 ").append(keywords)
+                .append(" 的段落共 ").append(hits.size()).append(" 段，返回前 ").append(show).append(" 段:\n\n");
+        for (int k = 0; k < show; k++) {
+            Hit h = hits.get(k);
+            sb.append("[第 ").append(h.start()).append("-").append(h.end()).append(" 行，命中 ")
+                    .append(h.keywordCount()).append(" 个关键词]\n").append(h.text()).append('\n');
         }
         return sb.toString();
     }
 
-    private static boolean containsAny(String line, List<String> lowerKeywords) {
-        String lower = line.toLowerCase();
-        for (String kw : lowerKeywords) {
-            if (lower.contains(kw)) {
-                return true;
-            }
-        }
-        return false;
-    }
+    /** 一个命中段落：起始行、结束行、文本与命中的不同关键词数。 */
+    private record Hit(int start, int end, String text, int keywordCount) {}
 
     /** 相对路径相对于根目录解析，绝对路径原样使用。 */
     private Path resolve(String path) {

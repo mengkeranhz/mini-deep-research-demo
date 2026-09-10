@@ -28,8 +28,11 @@ public final class Config {
     /** 文件保存/读取根目录。rootDir 为空时回退：工作目录 → 项目目录。 */
     public record Storage(String rootDir) {}
 
+    /** read-file 工具：关键词检索默认返回的段落数。 */
+    public record ReadFile(int maxResults) {}
+
     /** 全量配置：llm + storage + tools 三段。 */
-    public record Data(Llm llm, WebSearch webSearch, Lbs lbs, Storage storage) {}
+    public record Data(Llm llm, WebSearch webSearch, Lbs lbs, Storage storage, ReadFile readFile) {}
 
     public static Data load() {
         Map<String, Object> root = new Yaml().load(expandEnv(readText()));
@@ -38,6 +41,7 @@ public final class Config {
         Map<String, Object> webSearch = asMap(tools.get("web-search"));
         Map<String, Object> lbs = asMap(tools.get("lbs-service"));
         Map<String, Object> storage = asMap(root.get("storage"));
+        Map<String, Object> readFile = asMap(tools.get("read-file"));
         return new Data(
                 new Llm(
                         str(llm, "provider"), str(llm, "base-url"), str(llm, "model"), str(llm, "api-key"),
@@ -48,7 +52,8 @@ public final class Config {
                         str(webSearch, "tavily-api-key"),
                         intVal(webSearch, "max-results", 5)),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
-                new Storage(str(storage, "root-dir")));
+                new Storage(str(storage, "root-dir")),
+                new ReadFile(intVal(readFile, "max-results", 5)));
     }
 
     /** 文件根目录解析：显式配置 root-dir → 工作目录(user.dir) → 项目目录(code source 所在)。 */
