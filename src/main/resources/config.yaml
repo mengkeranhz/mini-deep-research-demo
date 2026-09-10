@@ -13,3 +13,5 @@ tools:
     max-results: 5
   lbs-service:
     amap-api-key: "${AMAP_API_KEY}"
+    # 相邻两次高德请求的最小间隔（毫秒），防 QPS 超限；个人 key 约 3 QPS → 350ms
+    min-request-interval-ms: 350

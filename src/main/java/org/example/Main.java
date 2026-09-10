@@ -16,10 +16,10 @@ public class Main {
         System.out.println("述求: " + request);
         try {
             String conclusion = new Agent().run(request);
-            System.out.println("\n================ 最终结论 ================");
+            System.out.println("\n" + Console.header("================ 最终结论 ================"));
             System.out.println(conclusion);
         } catch (Exception e) {
-            System.err.println("执行失败: " + e.getMessage());
+            System.err.println(Console.error("执行失败: " + e.getMessage()));
             System.exit(1);
         }
     }

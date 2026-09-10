@@ -137,7 +137,7 @@ final class AnthropicClient implements LlmClient {
             }
             case "thinking_delta" -> {
                 b.put("thinking", b.path("thinking").asText("") + delta.path("thinking").asText());
-                System.err.print(delta.path("thinking").asText());
+                System.out.print(Console.thinking(delta.path("thinking").asText()));
             }
             case "signature_delta" ->
                     b.put("signature", b.path("signature").asText("") + delta.path("signature").asText());

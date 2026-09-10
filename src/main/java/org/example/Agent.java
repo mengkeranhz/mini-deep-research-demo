@@ -31,7 +31,7 @@ public class Agent {
         StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
-            System.out.println("\n======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========");
+            System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
 
             LlmResponse resp = llm.call(registry.definitions(), messages);
             if (cfg.llm().streaming()) {
@@ -50,7 +50,7 @@ public class Agent {
                 return resp.text(); // 无工具调用 → 结束返回结论
             }
             for (Block.ToolUse u : toolCalls) {
-                System.out.println("[调用工具] " + u.name() + " " + u.input());
+                System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));
             }
 
             // 完整内容块（thinking/text/tool_use）原样追加为 assistant 消息（含思考回传）
@@ -93,7 +93,7 @@ public class Agent {
     private static void printBlocks(LlmResponse resp) {
         for (Block b : resp.blocks()) {
             if (b instanceof Block.Thinking t) {
-                System.out.println("[思考] " + t.thinking());
+                System.out.println(Console.thinking("[思考] " + t.thinking()));
             } else if (b instanceof Block.Text t) {
                 System.out.println("[输出] " + t.text());
             }

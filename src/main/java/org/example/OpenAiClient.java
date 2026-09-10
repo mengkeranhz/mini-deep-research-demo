@@ -114,7 +114,7 @@ final class OpenAiClient implements LlmClient {
                 String think = delta.path("reasoning_content").asText("");
                 if (!think.isEmpty()) {
                     thinking.append(think);
-                    System.err.print(think);
+                    System.out.print(Console.thinking(think));
                 }
                 String chunk = delta.path("content").asText("");
                 if (!chunk.isEmpty()) {

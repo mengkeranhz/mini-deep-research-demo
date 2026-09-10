@@ -5,7 +5,7 @@ import java.util.List;
 /**
  * LLM 客户端中立接口；按配置 provider 创建 anthropic / openai 协议实现。
  * messages 含四种角色（system/user/assistant/tool），协议差异由各实现负责映射。
- * 流式时文本增量实时打到 stdout、思考增量打到 stderr；非流式由调用方统一打印。
+ * 流式时文本与思考增量均实时打到 stdout（思考以青色区分）；非流式由调用方统一打印。
  */
 public interface LlmClient {
 

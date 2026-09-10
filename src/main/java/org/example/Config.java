@@ -22,7 +22,8 @@ public final class Config {
 
     public record WebSearch(String tavilyApiKey, int maxResults) {}
 
-    public record Lbs(String amapApiKey) {}
+    /** minRequestIntervalMs：相邻两次高德请求的最小间隔（毫秒），防 QPS 超限。 */
+    public record Lbs(String amapApiKey, int minRequestIntervalMs) {}
 
     /** 全量配置：llm + tools 两段。 */
     public record Data(Llm llm, WebSearch webSearch, Lbs lbs) {}
@@ -42,7 +43,7 @@ public final class Config {
                 new WebSearch(
                         str(webSearch, "tavily-api-key"),
                         intVal(webSearch, "max-results", 5)),
-                new Lbs(str(lbs, "amap-api-key")));
+                new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)));
     }
 
     private static final Pattern ENV_VAR = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*)}");

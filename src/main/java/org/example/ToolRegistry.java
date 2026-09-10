@@ -43,7 +43,7 @@ public class ToolRegistry {
     private final Map<String, AgentTool> tools = new LinkedHashMap<>();
 
     public ToolRegistry(Config.Data cfg) {
-        AmapClient amap = new AmapClient(cfg.lbs().amapApiKey());
+        AmapClient amap = new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs());
         scanPackage(TOOL_PACKAGE).stream()
                 .filter(ToolRegistry::isToolClass)
                 .sorted(Comparator.comparing(Class::getSimpleName)) // 按类名稳定排序
