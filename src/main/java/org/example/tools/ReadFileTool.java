@@ -32,22 +32,32 @@ public class ReadFileTool implements AgentTool {
     @Override
     public ToolDef definition() {
         return new ToolDef(name(), "按行读取本地文件（fetch_url 保存的 Markdown、PDF 等），返回指定范围的行。"
-                        + "文件较长时可多次调用翻页阅读。",
+                        + "文件较长时可多次调用翻页阅读；提供 keywords 时改为返回命中关键词的行。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "path", Map.of("type", "string", "description", "文件路径（相对路径相对于根目录解析）"),
                                 "offset", Map.of("type", "integer", "description", "起始行号（0 起），默认 0"),
-                                "limit", Map.of("type", "integer", "description", "返回行数，默认 200")),
+                                "limit", Map.of("type", "integer", "description", "返回行数，默认 200"),
+                                "keywords", Map.of("type", "array",
+                                        "items", Map.of("type", "string"),
+                                        "description", "关键词列表，命中任意一个即返回该行（忽略 offset/limit）")),
                         "required", List.of("path")));
     }
 
     @Override
     public String execute(JsonNode input) throws Exception {
         String path = ToolRegistry.str(input, "path");
+        List<String> lines = readAllLines(resolve(path));
+
+        List<String> keywords = input.hasNonNull("keywords")
+                ? ToolRegistry.strList(input, "keywords").stream().filter(k -> !k.isBlank()).toList()
+                : List.of();
+        if (!keywords.isEmpty()) {
+            return searchByKeywords(path, lines, keywords);
+        }
+
         int offset = ToolRegistry.optInt(input, "offset", 0);
         int limit = ToolRegistry.optInt(input, "limit", 200);
-
-        List<String> lines = readAllLines(resolve(path));
         int from = Math.min(offset, lines.size());
         int to = Math.min(from + limit, lines.size());
         StringBuilder sb = new StringBuilder("文件 ").append(path).append(" 共 ").append(lines.size())
@@ -56,6 +66,34 @@ public class ReadFileTool implements AgentTool {
             sb.append(i).append(": ").append(lines.get(i)).append('\n');
         }
         return sb.toString();
+    }
+
+    /** 返回命中任意关键词的行（不区分大小写）。 */
+    private String searchByKeywords(String path, List<String> lines, List<String> keywords) {
+        List<String> lowerKeywords = keywords.stream().map(String::toLowerCase).toList();
+        StringBuilder sb = new StringBuilder("文件 ").append(path).append(" 命中关键词 ").append(keywords).append(" 的行:\n");
+        int hit = 0;
+        for (int i = 0; i < lines.size(); i++) {
+            String line = lines.get(i);
+            if (containsAny(line, lowerKeywords)) {
+                sb.append(i).append(": ").append(line).append('\n');
+                hit++;
+            }
+        }
+        if (hit == 0) {
+            return "文件 " + path + " 中没有命中关键词 " + keywords + " 的内容。";
+        }
+        return sb.toString();
+    }
+
+    private static boolean containsAny(String line, List<String> lowerKeywords) {
+        String lower = line.toLowerCase();
+        for (String kw : lowerKeywords) {
+            if (lower.contains(kw)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 相对路径相对于根目录解析，绝对路径原样使用。 */
