@@ -129,6 +129,7 @@ public class ToolRegistry {
                 if (types[i] == AmapClient.class) args[i] = amap;
                 else if (types[i] == Config.WebSearch.class) args[i] = cfg.webSearch();
                 else if (types[i] == Config.Lbs.class) args[i] = cfg.lbs();
+                else if (types[i] == Config.Storage.class) args[i] = cfg.storage();
                 else if (types[i] == Config.Data.class) args[i] = cfg;
                 else {
                     resolvable = false;

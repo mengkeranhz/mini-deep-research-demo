@@ -25,8 +25,11 @@ public final class Config {
     /** minRequestIntervalMs：相邻两次高德请求的最小间隔（毫秒），防 QPS 超限。 */
     public record Lbs(String amapApiKey, int minRequestIntervalMs) {}
 
-    /** 全量配置：llm + tools 两段。 */
-    public record Data(Llm llm, WebSearch webSearch, Lbs lbs) {}
+    /** 文件保存/读取根目录。rootDir 为空时回退：工作目录 → 项目目录。 */
+    public record Storage(String rootDir) {}
+
+    /** 全量配置：llm + storage + tools 三段。 */
+    public record Data(Llm llm, WebSearch webSearch, Lbs lbs, Storage storage) {}
 
     public static Data load() {
         Map<String, Object> root = new Yaml().load(expandEnv(readText()));
@@ -34,6 +37,7 @@ public final class Config {
         Map<String, Object> tools = asMap(root.get("tools"));
         Map<String, Object> webSearch = asMap(tools.get("web-search"));
         Map<String, Object> lbs = asMap(tools.get("lbs-service"));
+        Map<String, Object> storage = asMap(root.get("storage"));
         return new Data(
                 new Llm(
                         str(llm, "provider"), str(llm, "base-url"), str(llm, "model"), str(llm, "api-key"),
@@ -43,7 +47,40 @@ public final class Config {
                 new WebSearch(
                         str(webSearch, "tavily-api-key"),
                         intVal(webSearch, "max-results", 5)),
-                new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)));
+                new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
+                new Storage(str(storage, "root-dir")));
+    }
+
+    /** 文件根目录解析：显式配置 root-dir → 工作目录(user.dir) → 项目目录(code source 所在)。 */
+    public static Path rootDir(Storage storage) {
+        String configured = storage == null ? null : storage.rootDir();
+        if (configured != null && !configured.isBlank()) {
+            return Path.of(configured).toAbsolutePath().normalize();
+        }
+        Path wd = Path.of(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
+        if (Files.isDirectory(wd) && Files.isWritable(wd)) {
+            return wd;
+        }
+        Path project = projectDir();
+        return project != null ? project : wd;
+    }
+
+    /** 项目目录：code source 所在（IDE 下为 target/classes 上两级；jar 下为 jar 所在目录）。 */
+    private static Path projectDir() {
+        try {
+            java.net.URL loc = Config.class.getProtectionDomain().getCodeSource().getLocation();
+            if (loc == null) {
+                return null;
+            }
+            Path p = Path.of(loc.toURI()).toAbsolutePath().normalize();
+            if (Files.isDirectory(p)) { // classes 目录形态：target/classes → 项目根
+                return p.getParent() != null && p.getParent().getParent() != null
+                        ? p.getParent().getParent() : p;
+            }
+            return p.getParent(); // jar 形态：jar 所在目录
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private static final Pattern ENV_VAR = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*)}");

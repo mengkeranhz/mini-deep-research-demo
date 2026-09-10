@@ -25,6 +25,8 @@ public final class Http {
         HttpResponse<byte[]> resp = CLIENT.send(
                 HttpRequest.newBuilder(URI.create(url.strip()))
                         .header("User-Agent", USER_AGENT)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
                         .timeout(Duration.ofSeconds(60))
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofByteArray());

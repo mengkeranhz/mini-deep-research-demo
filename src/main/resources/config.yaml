@@ -7,6 +7,11 @@ llm:
   temperature: 0
   streaming: true
 
+storage:
+  # 文件保存/读取的根目录。留空时自动回退：工作目录(user.dir) → 项目目录。
+  # 也可显式指定绝对路径，或相对工作目录的路径（如 "./data"）。
+  root-dir: ""
+
 tools:
   web-search:
     tavily-api-key: "${TAVILY_API_KEY}"
