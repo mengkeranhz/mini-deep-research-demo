@@ -1,0 +1,15 @@
+llm:
+  provider: anthropic
+  base-url: https://open.bigmodel.cn/api/anthropic
+  model: glm-5.3
+  api-key: "${LLM_API_KEY}"
+  max-tokens: 8192
+  temperature: 0
+  streaming: true
+
+tools:
+  web-search:
+    tavily-api-key: "${TAVILY_API_KEY}"
+    max-results: 5
+  lbs-service:
+    amap-api-key: "${AMAP_API_KEY}"
