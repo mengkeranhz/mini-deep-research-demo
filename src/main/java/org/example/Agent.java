@@ -9,7 +9,7 @@ import java.util.List;
  * 依次执行工具收集结果 → 超阈值压缩上下文。
  */
 public class Agent {
-    static final int MAX_ROUNDS = 60;
+    static final int MAX_ROUNDS = 120;
     /** 上一次响应 inputTokens 超过该值即触发上下文压缩（演示时可调小）。 */
     static final int CONTEXT_TOKEN_THRESHOLD = 60_000;
     /** 最终校验未通过时最多触发的重规划次数（防死循环）。 */
