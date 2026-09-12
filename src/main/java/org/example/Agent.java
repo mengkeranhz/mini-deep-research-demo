@@ -16,11 +16,13 @@ public class Agent {
     private final Config.Data cfg;
     private final LlmClient llm;
     private final ToolRegistry registry;
+    private final TaskStore tasks;
 
     public Agent() {
         this.cfg = Config.load();
         this.llm = LlmClient.create(cfg.llm());
-        this.registry = new ToolRegistry(cfg);
+        this.tasks = new TaskStore();
+        this.registry = new ToolRegistry(cfg, tasks);
     }
 
     public String run(String request) {
@@ -33,7 +35,17 @@ public class Agent {
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
 
-            LlmResponse resp = llm.call(registry.definitions(), messages);
+            // LLM 看不到 TaskStore 外部状态 → 每轮重算一份任务快照，作为新系统块注入（人格之后、
+            // 对话之前）；只放进本次调用的副本，messages 不留旧快照，天然无陈旧堆积、压缩重建也无需处理
+            String snapshot = tasks.snapshot();
+            List<Msg> callMessages = messages;
+            if (snapshot != null) {
+                System.out.println(Console.header("[任务快照已注入] ") + tasks.progress());
+                callMessages = new ArrayList<>(messages);
+                callMessages.add(1, Msg.system(snapshot));
+            }
+
+            LlmResponse resp = llm.call(registry.definitions(), callMessages);
             if (cfg.llm().streaming()) {
                 System.out.println(); // 结束流式文本行
             } else {

@@ -42,12 +42,12 @@ public class ToolRegistry {
 
     private final Map<String, AgentTool> tools = new LinkedHashMap<>();
 
-    public ToolRegistry(Config.Data cfg) {
+    public ToolRegistry(Config.Data cfg, TaskStore tasks) {
         AmapClient amap = new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs());
         scanPackage(TOOL_PACKAGE).stream()
                 .filter(ToolRegistry::isToolClass)
                 .sorted(Comparator.comparing(Class::getSimpleName)) // 按类名稳定排序
-                .map(c -> instantiate(c, cfg, amap))
+                .map(c -> instantiate(c, cfg, amap, tasks))
                 .forEach(this::register);
     }
 
@@ -119,14 +119,16 @@ public class ToolRegistry {
                 && !Modifier.isAbstract(clazz.getModifiers());
     }
 
-    /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / Config 各段），无参构造直接实例化。 */
-    private static AgentTool instantiate(Class<?> clazz, Config.Data cfg, AmapClient amap) {
+    /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / TaskStore / Config 各段），无参构造直接实例化。 */
+    private static AgentTool instantiate(Class<?> clazz, Config.Data cfg, AmapClient amap, TaskStore tasks) {
         for (Constructor<?> ctor : clazz.getDeclaredConstructors()) {
             Class<?>[] types = ctor.getParameterTypes();
             Object[] args = new Object[types.length];
             boolean resolvable = true;
             for (int i = 0; i < types.length; i++) {
                 if (types[i] == AmapClient.class) args[i] = amap;
+                else if (types[i] == TaskStore.class) args[i] = tasks;
+                else if (types[i] == Config.Llm.class) args[i] = cfg.llm();
                 else if (types[i] == Config.WebSearch.class) args[i] = cfg.webSearch();
                 else if (types[i] == Config.Lbs.class) args[i] = cfg.lbs();
                 else if (types[i] == Config.Storage.class) args[i] = cfg.storage();
@@ -147,7 +149,7 @@ public class ToolRegistry {
             }
         }
         throw new IllegalStateException("无法实例化工具 " + clazz.getName()
-                + "：构造参数需为无参或 AmapClient / Config 各段");
+                + "：构造参数需为无参或 AmapClient / TaskStore / Config 各段");
     }
 
     private static Class<?> loadClass(String name) {
