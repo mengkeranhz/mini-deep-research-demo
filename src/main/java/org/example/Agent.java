@@ -44,6 +44,7 @@ public class Agent {
         // 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）
         StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
         int replans = 0; // 最终校验未通过触发的重规划次数
+        String bestAnswer = null; // 当前最完整的交付草稿：校验/压缩围绕它，最终返回的是完整答案而非补丁
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
@@ -72,23 +73,28 @@ public class Agent {
                 }
             }
             if (toolCalls.isEmpty()) {
-                String draft = resp.text();
+                String candidate = resp.text();
+                if (!candidate.isBlank()) {
+                    bestAnswer = candidate; // 每次无工具响应的全文都视为最新完整草稿
+                }
                 // 最终回答前硬闸门：存在活跃计划且未超重规划上限时，校验约束与质量
-                String criteria = tasks.snapshot();
+                // 校验依据用固定基线（原始约束），不用会随重规划变化的 live 快照
+                String criteria = tasks.baseline();
                 if (criteria != null && replans < MAX_REPLANS) {
-                    String verdict = verify(draft, criteria);
+                    String verdict = verify(candidate, criteria);
                     if (!verdict.strip().toUpperCase().startsWith("PASS")) {
                         System.out.println("\n[最终校验] 未通过，触发重规划：\n" + verdict);
                         messages.add(Msg.assistant(resp.blocks()));
                         messages.add(Msg.user("你的回答未通过最终校验，存在以下缺陷：\n" + verdict
-                                + "\n\n请先调用 analyze_query 重新规划，补齐缺陷后再给出最终回答。"));
-                        transcript.append("助手: ").append(draft.isEmpty() ? "（草稿回答）" : draft).append('\n');
+                                + "\n\n请先调用 analyze_query 重新规划，并在补齐缺陷后【重新输出完整的最终回答】"
+                                + "——不要只输出补丁或缺失部分，必须覆盖全部行程（含吃住）。"));
+                        transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
                         replans++;
                         continue;
                     }
                     System.out.println("[最终校验] 通过");
                 }
-                return draft; // 无工具调用 → 结束返回结论
+                return candidate; // 无工具调用 → 结束返回结论
             }
             for (Block.ToolUse u : toolCalls) {
                 System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));
@@ -120,12 +126,16 @@ public class Agent {
                 // 6.2 无工具单次调用总结（直接发原 messages 会因 tool_use 缺 tool_result 报错）
                 String summary = llm.summarize(transcript.toString());
                 System.out.println("[上下文压缩] 摘要:\n" + summary);
-                // 6.3 重建：旧对话与思考全部清除，仅保留原始述求 + 摘要 + 继续指令
-                String rebuilt = "原始任务述求：\n" + request
-                        + "\n\n之前的执行进度摘要：\n" + summary
-                        + "\n\n请基于以上进度继续完成任务。";
+                // 6.3 重建：旧对话与思考全部清除，保留原始述求 + 摘要 + 已完成完整草稿 + 继续指令
+                StringBuilder rebuilt = new StringBuilder("原始任务述求：\n").append(request)
+                        .append("\n\n之前的执行进度摘要：\n").append(summary);
+                if (bestAnswer != null && !bestAnswer.isBlank()) {
+                    rebuilt.append("\n\n【当前已完成但尚未通过最终校验的完整答案草稿，"
+                            + "请在其基础上修订补全，最终必须重新输出完整的最终答案】\n").append(bestAnswer);
+                }
+                rebuilt.append("\n\n请基于以上进度继续完成任务。");
                 messages = new ArrayList<>(List.of(
-                        Msg.system(SystemPrompt.PERSONA), Msg.user(rebuilt)));
+                        Msg.system(SystemPrompt.PERSONA), Msg.user(rebuilt.toString())));
                 transcript = new StringBuilder("用户: ").append(rebuilt).append('\n');
             }
         }

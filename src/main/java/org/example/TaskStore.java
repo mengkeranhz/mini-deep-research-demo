@@ -18,10 +18,15 @@ public class TaskStore {
     public record Header(String plan, List<String> constraints, List<String> unknowns) {}
 
     private Header header;
+    /** 首次规划固化的校验基线：重规划不覆盖，供最终校验对照原始约束。 */
+    private Header baseline;
     private final List<Task> tasks = new ArrayList<>();
 
-    /** 写入新任务清单（重复调用即重新规划，旧清单作废）。 */
+    /** 写入新任务清单（重复调用即重新规划，旧任务作废；但校验基线只在首次规划时固定）。 */
     public void reset(Header header, List<Task> newTasks) {
+        if (this.baseline == null) {
+            this.baseline = header; // 只固化第一次规划，重规划不得改判断基准
+        }
         this.header = header;
         tasks.clear();
         tasks.addAll(newTasks);
@@ -53,6 +58,27 @@ public class TaskStore {
     public String progress() {
         return tasks.stream().filter(t -> "done".equals(t.status())).count()
                 + "/" + tasks.size() + " 完成";
+    }
+
+    /**
+     * 固定校验基线：首次规划时的总体计划、硬约束与信息缺口。
+     * 与 snapshot() 不同，本方法内容不随重规划变化，用于最终校验始终对照原始约束。
+     */
+    public String baseline() {
+        if (baseline == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder("# 校验基线（首次规划的原始约束，固定不变）\n");
+        if (!baseline.plan().isBlank()) {
+            sb.append("总体计划: ").append(baseline.plan()).append('\n');
+        }
+        if (!baseline.constraints().isEmpty()) {
+            sb.append("硬约束: ").append(String.join("、", baseline.constraints())).append('\n');
+        }
+        if (!baseline.unknowns().isEmpty()) {
+            sb.append("信息缺口: ").append(String.join("、", baseline.unknowns())).append('\n');
+        }
+        return sb.toString();
     }
 
     /**
