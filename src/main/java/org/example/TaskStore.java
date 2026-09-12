@@ -15,7 +15,7 @@ public class TaskStore {
     public record Task(String id, String content, List<String> dependsOn, String status, String note) {}
 
     /** analyze_query 的分析头信息，进入每轮快照头部。 */
-    public record Header(String intent, String plan, List<String> unknowns) {}
+    public record Header(String plan, List<String> constraints, List<String> unknowns) {}
 
     private Header header;
     private final List<Task> tasks = new ArrayList<>();
@@ -80,11 +80,11 @@ public class TaskStore {
 
         StringBuilder sb = new StringBuilder("# 任务进度快照（系统每轮自动注入，非用户消息）\n");
         if (header != null) {
-            if (!header.intent().isBlank()) {
-                sb.append("意图: ").append(header.intent()).append('\n');
-            }
             if (!header.plan().isBlank()) {
                 sb.append("计划: ").append(header.plan()).append('\n');
+            }
+            if (!header.constraints().isEmpty()) {
+                sb.append("硬约束: ").append(String.join("、", header.constraints())).append('\n');
             }
             if (!header.unknowns().isEmpty()) {
                 sb.append("信息缺口: ").append(String.join("、", header.unknowns())).append('\n');

@@ -12,15 +12,27 @@ public class Agent {
     static final int MAX_ROUNDS = 60;
     /** 上一次响应 inputTokens 超过该值即触发上下文压缩（演示时可调小）。 */
     static final int CONTEXT_TOKEN_THRESHOLD = 60_000;
+    /** 最终校验未通过时最多触发的重规划次数（防死循环）。 */
+    static final int MAX_REPLANS = 3;
+
+    /** 最终校验器提示词：对照约束与质量检查草稿，通过输出 PASS，否则逐条列缺陷。 */
+    private static final String VERIFY_PROMPT = """
+            你是答案质量校验器。对照「校验依据」检查「草稿回答」：
+            1. 所有硬约束是否满足；2. 信息缺口是否已说明或给出合理假设；3. 关键事实是否有来源、是否可信；4. 是否仍有未完成、未核实或答非所问之处。
+            若已满足约束且质量足够，只输出一行 PASS；否则逐条列出缺陷（每行一条，具体、可执行，供后续补救）。
+            """;
 
     private final Config.Data cfg;
     private final LlmClient llm;
+    private final LlmClient quietLlm; // 无工具、非流式：最终校验等嵌套调用用
     private final ToolRegistry registry;
     private final TaskStore tasks;
 
     public Agent() {
         this.cfg = Config.load();
         this.llm = LlmClient.create(cfg.llm());
+        this.quietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
+                cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
         this.tasks = new TaskStore();
         this.registry = new ToolRegistry(cfg, tasks);
     }
@@ -31,6 +43,7 @@ public class Agent {
         messages.add(Msg.user(request));
         // 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）
         StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
+        int replans = 0; // 最终校验未通过触发的重规划次数
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
@@ -59,7 +72,23 @@ public class Agent {
                 }
             }
             if (toolCalls.isEmpty()) {
-                return resp.text(); // 无工具调用 → 结束返回结论
+                String draft = resp.text();
+                // 最终回答前硬闸门：存在活跃计划且未超重规划上限时，校验约束与质量
+                String criteria = tasks.snapshot();
+                if (criteria != null && replans < MAX_REPLANS) {
+                    String verdict = verify(draft, criteria);
+                    if (!verdict.strip().toUpperCase().startsWith("PASS")) {
+                        System.out.println("\n[最终校验] 未通过，触发重规划：\n" + verdict);
+                        messages.add(Msg.assistant(resp.blocks()));
+                        messages.add(Msg.user("你的回答未通过最终校验，存在以下缺陷：\n" + verdict
+                                + "\n\n请先调用 analyze_query 重新规划，补齐缺陷后再给出最终回答。"));
+                        transcript.append("助手: ").append(draft.isEmpty() ? "（草稿回答）" : draft).append('\n');
+                        replans++;
+                        continue;
+                    }
+                    System.out.println("[最终校验] 通过");
+                }
+                return draft; // 无工具调用 → 结束返回结论
             }
             for (Block.ToolUse u : toolCalls) {
                 System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));
@@ -77,7 +106,9 @@ public class Agent {
             // 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传
             for (Block.ToolUse call : toolCalls) {
                 ToolRegistry.ToolOutput out = registry.run(call);
-                System.out.println("[工具结果] " + preview(out.content()));
+                // analyze_query 的规划 JSON 必须完整可见；其余工具结果仍按预览截断，避免刷屏
+                String printed = "analyze_query".equals(call.name()) ? out.content() : preview(out.content());
+                System.out.println("[工具结果] " + printed);
                 messages.add(Msg.tool(new Block.ToolResult(call.id(), out.content(), out.isError())));
             }
             transcript.append("  [结果] 已回传 ").append(toolCalls.size()).append(" 个工具结果\n");
@@ -110,6 +141,13 @@ public class Agent {
                 System.out.println("[输出] " + t.text());
             }
         }
+    }
+
+    /** 最终校验：quiet 客户端判断草稿是否满足约束与质量，返回 PASS 或缺陷清单。 */
+    private String verify(String draft, String criteria) {
+        return quietLlm.call(List.of(),
+                List.of(Msg.system(VERIFY_PROMPT),
+                        Msg.user("校验依据：\n" + criteria + "\n\n草稿回答：\n" + draft))).text();
     }
 
     /** 控制台预览工具结果前 200 字符。 */
