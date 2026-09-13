@@ -36,7 +36,7 @@ public class RouteQueryTool implements AgentTool {
                                 "mode", Map.of("type", "string",
                                         "enum", List.of("driving", "walking", "bicycling", "transit", "taxi"),
                                         "description", "出行方式"),
-                                "city", Map.of("type", "string", "description", "公交模式必填，城市名或城市编码，如「杭州」"),
+                                "city", Map.of("type", "string", "description", "公交模式必填，城市名或城市编码，如「北京」"),
                                 "date", Map.of("type", "string", "description", "出发日期（公交模式使用）")),
                         "required", List.of("origin", "destination", "mode")));
     }
@@ -94,7 +94,7 @@ public class RouteQueryTool implements AgentTool {
     private String transit(String origin, String destination, String time, String date, String city)
             throws Exception {
         if (city == null || city.isBlank()) {
-            throw new IllegalArgumentException("公交换乘(transit)必须提供 city 参数（城市名或城市编码，如「杭州」）");
+            throw new IllegalArgumentException("公交换乘(transit)必须提供 city 参数（城市名或城市编码，如「北京」）");
         }
         Map<String, String> params = new LinkedHashMap<>();
         params.put("origin", origin);

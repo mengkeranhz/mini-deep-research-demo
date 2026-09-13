@@ -126,7 +126,7 @@ public class FactsStore {
         return gaps.isEmpty() ? null : String.join("\n", gaps);
     }
 
-    /** 一行覆盖度摘要，如「覆盖 10/14 个目标时期；缺口: CPI@2022-Q2、CPI@2022-Q3」。 */
+    /** 一行覆盖度摘要，如「覆盖 8/10 个目标时期；缺口: GDP增速@2024-Q2、GDP增速@2024-Q3」。 */
     public String coverageLine() {
         int total = targets.values().stream().mapToInt(List::size).sum();
         if (total == 0) {
