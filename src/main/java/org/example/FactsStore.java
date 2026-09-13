@@ -7,40 +7,57 @@ import java.util.Map;
 
 /**
  * 事实账本外部存储：record_facts 写入结构化事实（维度×时期×口径 → 值/来源/状态），
- * analyze_query 声明覆盖目标（required_facts）。
+ * analyze_query 声明覆盖目标（required_facts，每个目标分配稳定 id：rf1、rf2…）。
+ * 覆盖匹配以「目标 id + 时期」为主（record_facts 的 fact.target 指向目标 id），
+ * 维度字符串仅作展示标签；未填 target 时退回维度规范化（去括号限定）匹配兜底。
  * 与 TaskStore 同理，LLM 看不到本类状态——Agent 每轮注入账本快照；
  * 上下文压缩与最终校验都以账本为准，防止「过程找到、结论遗漏」的矛盾：
  * 结论是账本的结算，不是对话记忆的复述。
  */
 public class FactsStore {
 
-    /** 单条事实：status 为 found（官方/已核验）、proxy（代理指标或第三方折算）、not_found（检索未得的缺口声明）。 */
-    public record Fact(String dimension, String period, String metric, String value,
-                       String source, String status, String note) {}
+    /** 覆盖目标：id 稳定（rf1、rf2…），dimension 仅作展示标签，periods 可随重规划追加。 */
+    public record Target(String id, String dimension, List<String> periods) {}
 
-    /** 覆盖目标：dimension → 需覆盖的时期列表（analyze_query 声明，重规划可追加）。 */
-    private final Map<String, List<String>> targets = new LinkedHashMap<>();
+    /** 单条事实：status 为 found（官方/已核验）、proxy（代理指标或第三方折算）、not_found（检索未得的缺口声明）；
+     *  target 指向覆盖目标 id（可空，空则退回维度规范化匹配）。 */
+    public record Fact(String dimension, String period, String metric, String value,
+                       String source, String status, String note, String target) {}
+
+    /** 覆盖目标：key = dimension.strip()，value = 目标（含稳定 id）。 */
+    private final Map<String, Target> targets = new LinkedHashMap<>();
     /** 已入账事实：key = dimension|period|metric，同 key 重复入账覆盖旧值。 */
     private final Map<String, Fact> facts = new LinkedHashMap<>();
+    private int nextTargetId = 1;
 
-    /** 声明（或追加）某维度需覆盖的时期；空白与重复时期忽略。 */
-    public void require(String dimension, List<String> periods) {
+    /** 声明（或追加）某维度需覆盖的时期；返回该维度的稳定 id（rfN）。空白与重复时期忽略。 */
+    public String require(String dimension, List<String> periods) {
         if (dimension == null || dimension.isBlank()) {
-            return;
+            return null;
         }
-        List<String> merged = new ArrayList<>(targets.getOrDefault(dimension.strip(), List.of()));
+        String d = dimension.strip();
+        Target t = targets.get(d);
+        if (t == null) {
+            t = new Target("rf" + nextTargetId++, d, new ArrayList<>());
+            targets.put(d, t);
+        }
         for (String p : periods) {
-            if (p != null && !p.isBlank() && !merged.contains(p.strip())) {
-                merged.add(p.strip());
+            if (p != null && !p.isBlank() && !t.periods().contains(p.strip())) {
+                t.periods().add(p.strip());
             }
         }
-        targets.put(dimension.strip(), merged);
+        return t.id();
     }
 
-    /** 入账一条事实（同 key 覆盖），返回是否新增或更新了内容。 */
+    /** 入账一条事实（同 key 覆盖），返回是否新增或更新了内容。target 指向未知 id 时退回维度兜底。 */
     public boolean record(Fact f) {
-        Fact old = facts.put(key(f.dimension(), f.period(), f.metric()), f);
-        return !f.equals(old);
+        String rawTarget = f.target();
+        String target = (rawTarget != null && targets.values().stream().noneMatch(t -> t.id().equals(rawTarget)))
+                ? null : rawTarget; // 未知 target：退回维度规范化匹配，避免错误引用导致覆盖丢失
+        Fact normalized = new Fact(f.dimension(), f.period(), f.metric(), f.value(),
+                f.source(), f.status(), f.note(), target);
+        Fact old = facts.put(key(f.dimension(), f.period(), f.metric()), normalized);
+        return !normalized.equals(old);
     }
 
     public boolean isEmpty() {
@@ -61,6 +78,9 @@ public class FactsStore {
             }
             sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
                     .append(" (").append(f.status()).append(")");
+            if (f.target() != null) {
+                sb.append(" → ").append(f.target());
+            }
             if (!f.source().isBlank()) {
                 sb.append(" 来源: ").append(f.source());
             }
@@ -73,20 +93,22 @@ public class FactsStore {
         if (!missing.isEmpty()) {
             sb.append("覆盖缺口（目标要求但尚未入账）: ").append(String.join("、", missing)).append('\n');
         }
-        sb.append("提醒: 新检索到的数据立即用 record_facts 入账；最终答案的全部数据必须与账本一致。\n");
+        sb.append("提醒: 新检索到的数据立即用 record_facts 入账（target 填对应 required_facts 的 id）；最终答案的全部数据必须与账本一致。\n");
         return sb.toString();
     }
 
-    /** 完整账本文本：覆盖目标 + 全部事实明细。用于最终校验对照与上下文压缩重建。 */
+    /** 完整账本文本：覆盖目标（含 id）+ 全部事实明细。用于最终校验对照与上下文压缩重建。 */
     public String ledger() {
         if (isEmpty()) {
             return null;
         }
         StringBuilder sb = new StringBuilder("# 事实账本（record_facts 累积的结构化数据）\n");
         if (!targets.isEmpty()) {
-            sb.append("## 覆盖目标\n");
-            targets.forEach((d, ps) -> sb.append("- ").append(d).append(": ")
-                    .append(String.join("、", ps)).append('\n'));
+            sb.append("## 覆盖目标（record_facts 用 target 填下列 id 完成覆盖匹配）\n");
+            for (Target t : targets.values()) {
+                sb.append("- [").append(t.id()).append("] ").append(t.dimension())
+                        .append(": ").append(String.join("、", t.periods())).append('\n');
+            }
         }
         sb.append("## 已入账事实（").append(counts()).append("）\n");
         int i = 1;
@@ -97,6 +119,9 @@ public class FactsStore {
             }
             sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
                     .append(" | ").append(f.status());
+            if (f.target() != null) {
+                sb.append(" | 目标: ").append(f.target());
+            }
             if (!f.source().isBlank()) {
                 sb.append(" | 来源: ").append(f.source());
             }
@@ -126,9 +151,9 @@ public class FactsStore {
         return gaps.isEmpty() ? null : String.join("\n", gaps);
     }
 
-    /** 一行覆盖度摘要，如「覆盖 8/10 个目标时期；缺口: GDP增速@2024-Q2、GDP增速@2024-Q3」。 */
+    /** 一行覆盖度摘要，如「覆盖 8/10 个目标时期；缺口: rf1@2024-Q2（GDP增速）、…」。 */
     public String coverageLine() {
-        int total = targets.values().stream().mapToInt(List::size).sum();
+        int total = targets.values().stream().mapToInt(t -> t.periods().size()).sum();
         if (total == 0) {
             return "未声明覆盖目标（analyze_query 的 required_facts 可声明）";
         }
@@ -137,19 +162,40 @@ public class FactsStore {
                 + (missing.isEmpty() ? "" : "；缺口: " + String.join("、", missing));
     }
 
-    /** 覆盖目标中尚无任何事实入账的「维度@时期」列表。 */
+    /** 覆盖目标中尚无任何事实入账的「id@时期（维度）」列表。 */
     private List<String> missingPeriods() {
         List<String> missing = new ArrayList<>();
-        for (Map.Entry<String, List<String>> e : targets.entrySet()) {
-            for (String p : e.getValue()) {
-                boolean hit = facts.values().stream()
-                        .anyMatch(f -> e.getKey().equals(f.dimension()) && p.equals(f.period()));
+        for (Target t : targets.values()) {
+            for (String p : t.periods()) {
+                boolean hit = facts.values().stream().anyMatch(f -> covers(t, p, f));
                 if (!hit) {
-                    missing.add(e.getKey() + "@" + p);
+                    missing.add(t.id() + "@" + p + "（" + t.dimension() + "）");
                 }
             }
         }
         return missing;
+    }
+
+    /** 判断事实 f 是否覆盖目标 t 的时期 p：优先 target id，未填 target 时退回维度规范化匹配。 */
+    private static boolean covers(Target t, String p, Fact f) {
+        if (!p.equals(f.period())) {
+            return false;
+        }
+        if (f.target() != null) {
+            return t.id().equals(f.target());
+        }
+        return canonical(t.dimension()).equals(canonical(f.dimension()));
+    }
+
+    /** 维度规范化（纯结构，不背题）：去括号限定、去空白、英文小写。覆盖匹配的兜底路径。 */
+    private static String canonical(String dimension) {
+        if (dimension == null) {
+            return "";
+        }
+        return dimension.strip()
+                .replaceAll("[（(][^（）()]*[）)]", "")
+                .replaceAll("\\s+", "")
+                .toLowerCase();
     }
 
     private String counts() {

@@ -35,6 +35,7 @@ public class AnalyzeQueryTool implements AgentTool {
             - unknowns: 用户未说清、需澄清或需做假设的信息数组
             - plan: 一句话总体执行策略
             - required_facts: 需要检索的数据覆盖目标数组，每项 {"dimension": "指标维度", "periods": ["时期", ...]}。
+              每项会被系统分配稳定 id（rf1、rf2…），record_facts 用 target 填对应 id 完成覆盖匹配。
               时期逐项枚举全（这会成为最终答案的覆盖度检查表，漏枚举即漏答）；粒度跟随数据实际发布口径——
               季度指标逐年逐季列出（如 ["2024","2024-Q1","2024-Q2","2024-Q3","2024-Q4",...]），
               年度指标只列年份；非时间序列数据用自然时期（如 ["国庆假期"]）。
@@ -61,6 +62,7 @@ public class AnalyzeQueryTool implements AgentTool {
     @Override
     public ToolDef definition() {
         return new ToolDef(name(), "分析用户述求：识别硬约束与信息缺口，给出总体计划并拆解为带依赖的任务清单（JSON）。"
+                        + "required_facts 每项会被分配稳定 id（rf1、rf2…），record_facts 用 target 引用。"
                         + "初始规划或执行中发现新信息、需要新任务时随时可调用；重规划会基于当前进度、复用已完成结论。"
                         + "生成的任务状态每轮以系统快照自动注入。",
                 Map.of("type", "object",
@@ -80,7 +82,9 @@ public class AnalyzeQueryTool implements AgentTool {
         planMsgs.add(Msg.system(PROMPT));
         String snapshot = tasks.snapshot();
         if (snapshot != null) {
-            planMsgs.add(Msg.system("当前进度（供重规划参考，尽量复用已完成结论，只补齐缺口）：\n" + snapshot));
+            planMsgs.add(Msg.system("当前进度（供重规划参考，尽量复用已完成结论，只补齐缺口）：\n" + snapshot
+                + "\n规则：已完成任务若需保留在 tasks 中，content 必须与上版逐字一致（系统据此继承「完成」状态，"
+                + "不要改写或同义替换）；也可以直接省略已完成任务，只列待办与新任务。"));
         }
         planMsgs.add(Msg.user(query));
         String raw = LlmClient.create(quiet).call(List.of(), planMsgs).text();
@@ -115,18 +119,25 @@ public class AnalyzeQueryTool implements AgentTool {
         tasks.reset(new TaskStore.Header(root.path("plan").asText(""),
                 strList(root.path("constraints")), strList(root.path("unknowns"))), parsed);
 
-        // 覆盖目标写入事实账本（追加合并，重规划只补不丢），作为最终答案的覆盖度检查表
+        // 覆盖目标写入事实账本（追加合并，重规划只补不丢），作为最终答案的覆盖度检查表；每项分配稳定 id
+        ArrayNode rfs = M.createArrayNode();
         for (JsonNode rf : root.path("required_facts")) {
-            facts.require(rf.path("dimension").asText(null), strList(rf.path("periods")));
+            String id = facts.require(rf.path("dimension").asText(null), strList(rf.path("periods")));
+            if (id != null) {
+                ObjectNode o = rfs.addObject();
+                o.put("id", id);
+                o.put("dimension", rf.path("dimension").asText(null));
+                o.set("periods", rf.path("periods"));
+            }
         }
 
-        // 归一化后的 JSON 回给模型（含分配的 id 与初始状态）
+        // 归一化后的 JSON 回给模型（含分配的目标 id 与任务初始状态）
         ObjectNode out = M.createObjectNode();
         out.set("constraints", M.valueToTree(strList(root.path("constraints"))));
         out.set("unknowns", M.valueToTree(strList(root.path("unknowns"))));
         out.put("plan", root.path("plan").asText(""));
-        if (root.has("required_facts")) {
-            out.set("required_facts", root.path("required_facts"));
+        if (!rfs.isEmpty()) {
+            out.set("required_facts", rfs);
         }
         ArrayNode ts = out.putArray("tasks");
         for (TaskStore.Task t : parsed) {
@@ -137,7 +148,7 @@ public class AnalyzeQueryTool implements AgentTool {
         }
         return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
                 + "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
-                + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径），"
+                + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径，target 填对应 required_facts 的 id），"
                 + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。";
     }
 

@@ -22,14 +22,26 @@ public class TaskStore {
     private Header baseline;
     private final List<Task> tasks = new ArrayList<>();
 
-    /** 写入新任务清单（重复调用即重新规划，旧任务作废；但校验基线只在首次规划时固定）。 */
+    /** 写入新任务清单（重复调用即重新规划；校验基线只在首次规划时固定）。
+     *  重规划保留已完成状态：新任务按规范化内容匹配旧任务，done 的继承 done（含备注），
+     *  避免重规划把进度清零导致重复劳动。 */
     public void reset(Header header, List<Task> newTasks) {
         if (this.baseline == null) {
             this.baseline = header; // 只固化第一次规划，重规划不得改判断基准
         }
         this.header = header;
+        Map<String, Task> doneByContent = new LinkedHashMap<>();
+        for (Task t : tasks) {
+            if ("done".equals(t.status())) {
+                doneByContent.put(contentKey(t.content()), t);
+            }
+        }
         tasks.clear();
-        tasks.addAll(newTasks);
+        for (Task nt : newTasks) {
+            Task old = doneByContent.get(contentKey(nt.content()));
+            tasks.add(old == null ? nt
+                    : new Task(nt.id(), nt.content(), nt.dependsOn(), "done", old.note()));
+        }
     }
 
     public boolean isEmpty() {
@@ -132,6 +144,11 @@ public class TaskStore {
             sb.append('\n');
         }
         return sb.toString();
+    }
+
+    /** 任务内容规范化 key：去空白与常见标点，用于重规划时按内容匹配继承完成状态。 */
+    private static String contentKey(String content) {
+        return content == null ? "" : content.replaceAll("[\\s，。、：:；;（）()、,./\\-]+", "");
     }
 
     private static String label(String status) {

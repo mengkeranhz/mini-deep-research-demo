@@ -35,7 +35,8 @@ public class RecordFactsTool implements AgentTool {
         return new ToolDef(name(), "把检索到的关键数据写入事实账本。每得到一条可用数据就立即入账"
                         + "（不要攒到最后批量补）；最终答案的全部数据必须来自账本。"
                         + "status: found=官方或已交叉核验；proxy=代理指标/第三方折算（note 写折算方法）；"
-                        + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。",
+                        + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。"
+                        + "target 填对应 required_facts 的 id（如 rf1），用于覆盖度匹配；对不上可留空。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "facts", Map.of("type", "array", "description", "本次入账的事实数组",
@@ -55,7 +56,9 @@ public class RecordFactsTool implements AgentTool {
                                                                 "enum", List.of("found", "proxy", "not_found"),
                                                                 "description", "数据状态"),
                                                         "note", Map.of("type", "string",
-                                                                "description", "口径说明/折算方法；not_found 时写已尝试的检索关键词与来源")),
+                                                                "description", "口径说明/折算方法；not_found 时写已尝试的检索关键词与来源"),
+                                                        "target", Map.of("type", "string",
+                                                                "description", "对应 required_facts 的 id（如 rf1），本事实覆盖哪个覆盖目标；可空")),
                                                 "required", List.of("dimension", "period", "status")))),
                         "required", List.of("facts")));
     }
@@ -89,7 +92,8 @@ public class RecordFactsTool implements AgentTool {
                     orEmpty(ToolRegistry.optStr(n, "metric")),
                     orEmpty(ToolRegistry.optStr(n, "value")),
                     orEmpty(ToolRegistry.optStr(n, "source")),
-                    status, orEmpty(note)));
+                    status, orEmpty(note),
+                    ToolRegistry.optStr(n, "target")));
             accepted++;
         }
         StringBuilder sb = new StringBuilder("已入账 ").append(accepted).append(" 条");
