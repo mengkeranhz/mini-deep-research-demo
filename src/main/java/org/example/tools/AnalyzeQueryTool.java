@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.example.Config;
+import org.example.FactsStore;
 import org.example.LlmClient;
 import org.example.Msg;
 import org.example.TaskStore;
@@ -33,17 +34,22 @@ public class AnalyzeQueryTool implements AgentTool {
             - constraints: 硬约束数组（时间、预算、方式等明确限制）
             - unknowns: 用户未说清、需澄清或需做假设的信息数组
             - plan: 一句话总体执行策略
+            - required_facts: 需要检索的数据覆盖目标数组，每项 {"dimension": "指标维度", "periods": ["时期", ...]}。
+              时期尽量逐项枚举全（这会成为最终答案的覆盖度检查表，漏枚举即漏答），如
+              ["2023","2023-Q1","2023-Q2","2023-Q3","2023-Q4","2024",...]；非时间序列数据用自然时期（如 ["国庆假期"]）。
             - tasks: 3-6 个可执行任务，每项 {"content": "一次工具调用可完成的动作", "depends_on": [前置任务的序号，从 1 起]}
-            示例（输入「国庆想去敦煌和德令哈玩 5 天，重点抢莫高窟票」）：
-            {"constraints":["国庆假期","共 5 天"],"unknowns":["出发城市","人数"],"plan":"先查门票与交通的预订规则，再排定行程","tasks":[{"content":"查莫高窟门票预订规则与放票时间","depends_on":[]},{"content":"查敦煌到德令哈的交通方式","depends_on":[]},{"content":"排定逐日行程","depends_on":[1,2]}]}
+            示例（输入「查杭州最近3年每季度的社平工资和CPI」）：
+            {"constraints":["地区：杭州","频率：季度"],"unknowns":["社平工资是否按季度发布"],"plan":"先确认发布口径再逐年逐季检索","required_facts":[{"dimension":"社会平均工资","periods":["2023","2024","2025"]},{"dimension":"CPI","periods":["2023","2023-Q1","2023-Q2","2023-Q3","2023-Q4","2024","2024-Q1","2024-Q2","2024-Q3","2024-Q4","2025","2025-Q1","2025-Q2","2025-Q3","2025-Q4"]}],"tasks":[{"content":"查杭州社平工资发布口径与年度数据","depends_on":[]},{"content":"查杭州CPI季度累计同比数据","depends_on":[]},{"content":"汇总对比工资与物价变化","depends_on":[1,2]}]}
             """;
 
     private final Config.Llm llmCfg;
     private final TaskStore tasks;
+    private final FactsStore facts;
 
-    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks) {
+    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks, FactsStore facts) {
         this.llmCfg = llmCfg;
         this.tasks = tasks;
+        this.facts = facts;
     }
 
     @Override
@@ -108,11 +114,19 @@ public class AnalyzeQueryTool implements AgentTool {
         tasks.reset(new TaskStore.Header(root.path("plan").asText(""),
                 strList(root.path("constraints")), strList(root.path("unknowns"))), parsed);
 
+        // 覆盖目标写入事实账本（追加合并，重规划只补不丢），作为最终答案的覆盖度检查表
+        for (JsonNode rf : root.path("required_facts")) {
+            facts.require(rf.path("dimension").asText(null), strList(rf.path("periods")));
+        }
+
         // 归一化后的 JSON 回给模型（含分配的 id 与初始状态）
         ObjectNode out = M.createObjectNode();
         out.set("constraints", M.valueToTree(strList(root.path("constraints"))));
         out.set("unknowns", M.valueToTree(strList(root.path("unknowns"))));
         out.put("plan", root.path("plan").asText(""));
+        if (root.has("required_facts")) {
+            out.set("required_facts", root.path("required_facts"));
+        }
         ArrayNode ts = out.putArray("tasks");
         for (TaskStore.Task t : parsed) {
             ObjectNode o = ts.addObject();
@@ -121,7 +135,8 @@ public class AnalyzeQueryTool implements AgentTool {
             o.put("status", t.status());
         }
         return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
-                + "\n任务清单已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
+                + "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
+                + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径），"
                 + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。";
     }
 
