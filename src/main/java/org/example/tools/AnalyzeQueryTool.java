@@ -8,7 +8,6 @@ import org.example.Config;
 import org.example.FactsStore;
 import org.example.LlmClient;
 import org.example.Msg;
-import org.example.NotesStore;
 import org.example.TaskStore;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
@@ -21,7 +20,7 @@ import java.util.Map;
 /**
  * analyze_query：把用户述求解析为计划 + 任务清单 JSON。
  * 内部复用主模型（关流式）做一次无工具调用，目标与任务写入 TaskStore，Agent 每轮注入进度快照；
- * 可随时重复调用重新规划（述求本身也允许调整）：注入任务进度、事实账本与工程备忘三份核心状态，
+ * 可随时重复调用重新规划（述求本身也允许调整）：注入任务进度与事实账本两份核心状态，
  * 已完成任务按内容匹配继承完成状态。
  */
 public class AnalyzeQueryTool implements AgentTool {
@@ -36,19 +35,17 @@ public class AnalyzeQueryTool implements AgentTool {
             - unknowns: 未知/待定点数组（用户未说清、需澄清或需做假设之处），无则空数组
             - tasks: 3-6 个可执行任务，每项为一个任务描述字符串。
               任务按数据获取方式组织：检索能解决的写检索任务，检索拿不到的写工程任务（run_code），不要都规划成换关键词的搜索。
-            若提供了当前进度、事实账本或工程备忘：结合已知信息规划，只补剩余工作；目标需要调整时按调整后的目标给出。
+            若提供了当前进度或事实账本：结合已知信息规划，只补剩余工作；目标需要调整时按调整后的目标给出。
             """;
 
     private final Config.Llm llmCfg;
     private final TaskStore tasks;
     private final FactsStore facts;
-    private final NotesStore notes;
 
-    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks, FactsStore facts, NotesStore notes) {
+    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks, FactsStore facts) {
         this.llmCfg = llmCfg;
         this.tasks = tasks;
         this.facts = facts;
-        this.notes = notes;
     }
 
     @Override
@@ -72,13 +69,12 @@ public class AnalyzeQueryTool implements AgentTool {
         // 复用主模型、关闭流式：嵌套调用的增量输出不应打进主循环控制台
         Config.Llm quiet = new Config.Llm(llmCfg.provider(), llmCfg.baseUrl(), llmCfg.model(),
                 llmCfg.apiKey(), llmCfg.maxTokens(), llmCfg.temperature(), false);
-        // 重规划注入三份核心状态：新计划基于已知信息，只补剩余工作，不丢已完成结论与工程发现
+        // 重规划注入两份核心状态：新计划基于已知信息，只补剩余工作，不丢已完成结论
         List<Msg> planMsgs = new ArrayList<>();
         planMsgs.add(Msg.system(PROMPT));
         String progress = tasks.snapshot();
         addSnapshot(planMsgs, progress);
         addSnapshot(planMsgs, facts.snapshot());
-        addSnapshot(planMsgs, notes.snapshot());
         if (progress != null) {
             planMsgs.add(Msg.system("重规划规则：新计划基于以上已知信息，只补剩余工作；"
                     + "已完成任务在新清单中保留原文（逐字一致）即继承完成状态，也可只列剩余任务。"));

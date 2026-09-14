@@ -42,12 +42,12 @@ public class ToolRegistry {
 
     private final Map<String, AgentTool> tools = new LinkedHashMap<>();
 
-    public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, NotesStore notes) {
+    public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts) {
         AmapClient amap = new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs());
         scanPackage(TOOL_PACKAGE).stream()
                 .filter(ToolRegistry::isToolClass)
                 .sorted(Comparator.comparing(Class::getSimpleName)) // 按类名稳定排序
-                .map(c -> instantiate(c, cfg, amap, tasks, facts, notes))
+                .map(c -> instantiate(c, cfg, amap, tasks, facts))
                 .forEach(this::register);
     }
 
@@ -119,9 +119,9 @@ public class ToolRegistry {
                 && !Modifier.isAbstract(clazz.getModifiers());
     }
 
-    /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / TaskStore / FactsStore / NotesStore / Config 各段），无参构造直接实例化。 */
+    /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / TaskStore / FactsStore / Config 各段），无参构造直接实例化。 */
     private static AgentTool instantiate(Class<?> clazz, Config.Data cfg, AmapClient amap, TaskStore tasks,
-                                         FactsStore facts, NotesStore notes) {
+                                         FactsStore facts) {
         for (Constructor<?> ctor : clazz.getDeclaredConstructors()) {
             Class<?>[] types = ctor.getParameterTypes();
             Object[] args = new Object[types.length];
@@ -130,7 +130,6 @@ public class ToolRegistry {
                 if (types[i] == AmapClient.class) args[i] = amap;
                 else if (types[i] == TaskStore.class) args[i] = tasks;
                 else if (types[i] == FactsStore.class) args[i] = facts;
-                else if (types[i] == NotesStore.class) args[i] = notes;
                 else if (types[i] == Config.Llm.class) args[i] = cfg.llm();
                 else if (types[i] == Config.WebSearch.class) args[i] = cfg.webSearch();
                 else if (types[i] == Config.Lbs.class) args[i] = cfg.lbs();
@@ -151,7 +150,7 @@ public class ToolRegistry {
             }
         }
         throw new IllegalStateException("无法实例化工具 " + clazz.getName()
-                + "：构造参数需为无参或 AmapClient / TaskStore / FactsStore / NotesStore / Config 各段");
+                + "：构造参数需为无参或 AmapClient / TaskStore / FactsStore / Config 各段");
     }
 
     private static Class<?> loadClass(String name) {

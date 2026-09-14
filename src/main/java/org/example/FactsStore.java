@@ -5,7 +5,7 @@ import java.util.Map;
 
 /**
  * 事实账本外部存储：record_facts 写入自由文本事实（数据描述 + 来源）。
- * 与 NotesStore 同理，LLM 看不到本类状态——Agent 每轮注入账本快照，
+ * LLM 看不到本类状态——Agent 每轮注入账本快照，
  * 上下文压缩后账本不丢，最终答案的数据以账本为准。
  */
 public class FactsStore {

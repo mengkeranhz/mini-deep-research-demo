@@ -6,9 +6,9 @@ import java.util.Locale;
 
 /**
  * Agent loop：
- * 轮次上限 → 注入任务进度、事实账本与工程备忘快照 → LLM（人格 + 工具元信息 + 对话与思考）→
+ * 轮次上限 → 注入任务进度与事实账本快照 → LLM（人格 + 工具元信息 + 对话与思考）→
  * 依次执行工具收集结果（正文写入对话稿）→ 无工具调用时对照任务述求与事实账本做最终校验，通过即返回 →
- * 超阈值压缩上下文（重建时显式携带原始述求、进度摘要与三份核心状态快照）。
+ * 超阈值压缩上下文（重建时显式携带原始述求、进度摘要与两份核心状态快照）。
  */
 public class Agent {
     static final int MAX_ROUNDS = 120;
@@ -36,7 +36,6 @@ public class Agent {
     private final ToolRegistry registry;
     private final TaskStore tasks;
     private final FactsStore facts;
-    private final NotesStore notes;
 
     public Agent() {
         this.cfg = Config.load();
@@ -45,8 +44,7 @@ public class Agent {
                 cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
         this.tasks = new TaskStore();
         this.facts = new FactsStore();
-        this.notes = new NotesStore();
-        this.registry = new ToolRegistry(cfg, tasks, facts, notes);
+        this.registry = new ToolRegistry(cfg, tasks, facts);
     }
 
     public String run(String request) {
@@ -59,22 +57,18 @@ public class Agent {
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
 
-            // LLM 看不到 TaskStore / FactsStore / NotesStore 外部状态 → 每轮重算三个快照，
+            // LLM 看不到 TaskStore / FactsStore 外部状态 → 每轮重算两个快照，
             // 作为新系统块注入（人格之后、对话之前）；只放进本次调用的副本，messages 不留旧快照，
             // 天然无陈旧堆积、压缩重建也无需处理
             String snapshot = tasks.snapshot();
             String factsSnapshot = facts.snapshot();
-            String notesSnapshot = notes.snapshot();
             List<Msg> callMessages = messages;
-            if (snapshot != null || factsSnapshot != null || notesSnapshot != null) {
+            if (snapshot != null || factsSnapshot != null) {
                 if (snapshot != null) {
                     System.out.println(Console.header("[任务快照已注入] ") + tasks.progress());
                 }
                 if (factsSnapshot != null) {
                     System.out.println(Console.header("[事实账本已注入] ") + facts.size() + " 条");
-                }
-                if (notesSnapshot != null) {
-                    System.out.println(Console.header("[工程备忘已注入] ") + notes.size() + " 条");
                 }
                 callMessages = new ArrayList<>(messages);
                 int injectAt = 1;
@@ -82,10 +76,7 @@ public class Agent {
                     callMessages.add(injectAt++, Msg.system(snapshot));
                 }
                 if (factsSnapshot != null) {
-                    callMessages.add(injectAt++, Msg.system(factsSnapshot));
-                }
-                if (notesSnapshot != null) {
-                    callMessages.add(injectAt, Msg.system(notesSnapshot));
+                    callMessages.add(injectAt, Msg.system(factsSnapshot));
                 }
             }
 
@@ -151,14 +142,14 @@ public class Agent {
             }
 
             // 以上次响应 input token 判断是否压缩（零额外调用）。
-            // 任务进度、事实、工程备忘重建时显式内联三份快照（见下），不再只依赖下一轮注入
+            // 任务进度、事实重建时显式内联两份快照（见下），不再只依赖下一轮注入
             if (resp.inputTokens() > CONTEXT_TOKEN_THRESHOLD) {
                 System.out.println("\n[上下文压缩] inputTokens=" + resp.inputTokens()
                         + " 超过阈值 " + CONTEXT_TOKEN_THRESHOLD + "，开始压缩…");
                 // 无工具单次调用总结（直接发原 messages 会因 tool_use 缺 tool_result 报错）
                 String summary = llm.summarize(transcript.toString());
                 System.out.println("[上下文压缩] 摘要:\n" + summary);
-                // 重建显式保留核心信息：原始述求（重规划调整过再附当前目标）+ 进度摘要 + 三份状态快照。
+                // 重建显式保留核心信息：原始述求（重规划调整过再附当前目标）+ 进度摘要 + 两份状态快照。
                 // 快照压缩时现算——本轮工具调用可能刚更新过 Store，不能用轮首旧值
                 StringBuilder rebuilt = new StringBuilder("原始任务述求：\n").append(request);
                 String goal = tasks.goal();
@@ -168,7 +159,6 @@ public class Agent {
                 rebuilt.append("\n\n之前的执行进度摘要：\n").append(summary);
                 appendSnapshot(rebuilt, tasks.snapshot());
                 appendSnapshot(rebuilt, facts.snapshot());
-                appendSnapshot(rebuilt, notes.snapshot());
                 rebuilt.append("\n\n请基于以上进度继续完成任务；最终答案的数据以事实账本为准。");
                 messages = new ArrayList<>(List.of(
                         Msg.system(SystemPrompt.PERSONA), Msg.user(rebuilt.toString())));
