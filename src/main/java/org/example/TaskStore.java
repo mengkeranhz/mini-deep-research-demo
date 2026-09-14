@@ -6,30 +6,32 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 任务状态外部存储：analyze_query 写入任务清单，update_task 更新进度。
- * LLM 看不到本类状态——Agent 每轮用 snapshot() 重算一份紧凑快照注入上下文。
+ * 任务状态外部存储：analyze_query 写入当前目标（任务基线，允许随重规划调整）、计划、约束与未知、
+ * 任务清单，update_task 更新进度。LLM 看不到本类状态——Agent 每轮用 snapshot() 重算一份紧凑快照注入上下文。
  */
 public class TaskStore {
 
-    /** 单个任务：dependsOn 为前置任务 id；status 为 pending / in_progress / done。 */
-    public record Task(String id, String content, List<String> dependsOn, String status, String note) {}
+    /** 单个任务：status 为 pending / in_progress / done。 */
+    public record Task(String id, String content, String status, String note) {}
 
-    /** analyze_query 的分析头信息，进入每轮快照头部。 */
-    public record Header(String plan, List<String> constraints, List<String> unknowns) {}
-
-    private Header header;
-    /** 首次规划固化的校验基线：重规划不覆盖，供最终校验对照原始约束。 */
-    private Header baseline;
+    private String goal;
+    private String plan;
+    private List<String> constraints = List.of();
+    private List<String> unknowns = List.of();
     private final List<Task> tasks = new ArrayList<>();
 
-    /** 写入新任务清单（重复调用即重新规划；校验基线只在首次规划时固定）。
-     *  重规划保留已完成状态：新任务按规范化内容匹配旧任务，done 的继承 done（含备注），
+    /** 写入新任务清单（重复调用即重新规划；goal 为本次分析的目标述求，基线随之更新，
+     *  约束与未知随本次分析整体替换）。
+     *  重规划保留已完成状态：新任务按内容匹配旧任务，done 的继承 done（含备注），
      *  避免重规划把进度清零导致重复劳动。 */
-    public void reset(Header header, List<Task> newTasks) {
-        if (this.baseline == null) {
-            this.baseline = header; // 只固化第一次规划，重规划不得改判断基准
+    public void reset(String goal, String plan, List<String> constraints, List<String> unknowns,
+                      List<Task> newTasks) {
+        if (goal != null && !goal.isBlank()) {
+            this.goal = goal.strip();
         }
-        this.header = header;
+        this.plan = plan;
+        this.constraints = constraints == null ? List.of() : List.copyOf(constraints);
+        this.unknowns = unknowns == null ? List.of() : List.copyOf(unknowns);
         Map<String, Task> doneByContent = new LinkedHashMap<>();
         for (Task t : tasks) {
             if ("done".equals(t.status())) {
@@ -39,13 +41,8 @@ public class TaskStore {
         tasks.clear();
         for (Task nt : newTasks) {
             Task old = doneByContent.get(contentKey(nt.content()));
-            tasks.add(old == null ? nt
-                    : new Task(nt.id(), nt.content(), nt.dependsOn(), "done", old.note()));
+            tasks.add(old == null ? nt : new Task(nt.id(), nt.content(), "done", old.note()));
         }
-    }
-
-    public boolean isEmpty() {
-        return tasks.isEmpty();
     }
 
     /** 更新状态与备注；id 不存在返回 null。note 为空时保留原备注。 */
@@ -53,7 +50,7 @@ public class TaskStore {
         for (int i = 0; i < tasks.size(); i++) {
             Task t = tasks.get(i);
             if (t.id().equals(id)) {
-                tasks.set(i, new Task(t.id(), t.content(), t.dependsOn(), status,
+                tasks.set(i, new Task(t.id(), t.content(), status,
                         note == null || note.isBlank() ? t.note() : note));
                 return tasks.get(i);
             }
@@ -66,80 +63,45 @@ public class TaskStore {
         return tasks.stream().map(Task::id).toList();
     }
 
+    /** 全部任务（只读视图），供 analyze_query 回显继承后的状态。 */
+    public List<Task> all() {
+        return List.copyOf(tasks);
+    }
+
     /** 进度统计，如「2/5 完成」。 */
     public String progress() {
         return tasks.stream().filter(t -> "done".equals(t.status())).count()
                 + "/" + tasks.size() + " 完成";
     }
 
-    /**
-     * 固定校验基线：首次规划时的总体计划、硬约束与信息缺口。
-     * 与 snapshot() 不同，本方法内容不随重规划变化，用于最终校验始终对照原始约束。
-     */
-    public String baseline() {
-        if (baseline == null) {
-            return null;
-        }
-        StringBuilder sb = new StringBuilder("# 校验基线（首次规划的原始约束，固定不变）\n");
-        if (!baseline.plan().isBlank()) {
-            sb.append("总体计划: ").append(baseline.plan()).append('\n');
-        }
-        if (!baseline.constraints().isEmpty()) {
-            sb.append("硬约束: ").append(String.join("、", baseline.constraints())).append('\n');
-        }
-        if (!baseline.unknowns().isEmpty()) {
-            sb.append("信息缺口: ").append(String.join("、", baseline.unknowns())).append('\n');
-        }
-        return sb.toString();
+    /** 当前任务基线（最近一次规划的目标述求）；未规划过为 null，届时以原始述求为准。 */
+    public String goal() {
+        return goal;
     }
 
-    /**
-     * 每轮重算的紧凑进度快照：分析头信息 + 进度统计 + 逐任务行。
-     * 就绪/阻塞不存储、每次现算：非完成任务且依赖全部完成即可执行，否则阻塞。
-     */
+    /** 每轮重算的紧凑进度快照：计划 + 进度统计 + 逐任务行。 */
     public String snapshot() {
         if (tasks.isEmpty()) {
             return null;
         }
-        Map<String, String> statusById = new LinkedHashMap<>();
-        tasks.forEach(t -> statusById.put(t.id(), t.status()));
-        Map<String, List<String>> waitingById = new LinkedHashMap<>(); // 未完成任务 → 未完成依赖
-        List<String> ready = new ArrayList<>();
-        List<String> blocked = new ArrayList<>();
-        for (Task t : tasks) {
-            if ("done".equals(t.status())) {
-                continue;
-            }
-            List<String> waiting = t.dependsOn().stream()
-                    .filter(d -> !"done".equals(statusById.get(d))).toList();
-            waitingById.put(t.id(), waiting);
-            (waiting.isEmpty() ? ready : blocked).add(t.id());
-        }
-
         StringBuilder sb = new StringBuilder("# 任务进度快照（系统每轮自动注入，非用户消息）\n");
-        if (header != null) {
-            if (!header.plan().isBlank()) {
-                sb.append("计划: ").append(header.plan()).append('\n');
-            }
-            if (!header.constraints().isEmpty()) {
-                sb.append("硬约束: ").append(String.join("、", header.constraints())).append('\n');
-            }
-            if (!header.unknowns().isEmpty()) {
-                sb.append("信息缺口: ").append(String.join("、", header.unknowns())).append('\n');
-            }
+        if (goal != null) {
+            sb.append("当前目标: ").append(goal).append('\n');
         }
-        sb.append("进度: ").append(progress())
-                .append("，可执行: ").append(ready.isEmpty() ? "无" : String.join("、", ready))
-                .append("，阻塞: ").append(blocked.isEmpty() ? "无" : String.join("、", blocked))
-                .append('\n');
+        if (plan != null && !plan.isBlank()) {
+            sb.append("计划: ").append(plan).append('\n');
+        }
+        if (!constraints.isEmpty()) {
+            sb.append("约束: ").append(String.join("、", constraints)).append('\n');
+        }
+        if (!unknowns.isEmpty()) {
+            sb.append("未知: ").append(String.join("、", unknowns)).append('\n');
+        }
+        sb.append("进度: ").append(progress()).append('\n');
         for (Task t : tasks) {
             sb.append(t.id()).append(" [").append(label(t.status())).append("] ").append(t.content());
             if (t.note() != null && !t.note().isBlank()) {
                 sb.append(" —— ").append(t.note());
-            }
-            List<String> waiting = waitingById.get(t.id());
-            if (waiting != null && !waiting.isEmpty()) {
-                sb.append("（等待 ").append(String.join("、", waiting)).append("）");
             }
             sb.append('\n');
         }

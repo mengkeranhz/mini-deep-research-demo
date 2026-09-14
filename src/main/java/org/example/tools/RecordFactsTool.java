@@ -6,19 +6,14 @@ import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
 /**
- * record_facts：把检索到的关键数据写入事实账本（维度×时期×口径 → 值/来源/状态）。
- * 账本是最终答案的结算依据——压缩与校验都以它为准，未入账的数据随时可能随上下文丢失。
+ * record_facts：把检索到的关键数据写入事实账本（自由文本 + 来源）。
+ * 账本跨上下文压缩保留，是最终答案的结算依据——未入账的数据随时可能随上下文丢失。
  */
 public class RecordFactsTool implements AgentTool {
-
-    private static final Set<String> STATUSES = Set.of("found", "proxy", "not_found");
 
     private final FactsStore facts;
 
@@ -33,38 +28,19 @@ public class RecordFactsTool implements AgentTool {
 
     @Override
     public ToolDef definition() {
-        return new ToolDef(name(), "把检索到的关键数据写入事实账本。每得到一条可用数据就立即入账"
-                        + "（不要攒到最后批量补）；最终答案的全部数据必须来自账本。"
-                        + "status: found=官方或已交叉核验；proxy=代理指标/第三方折算（note 写折算方法）；"
-                        + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。"
-                        + "target 填对应 required_facts 的 id（如 rf1），用于覆盖度匹配；对不上可留空。"
-                        + "官方一手来源记得填 tier=official。",
+        return new ToolDef(name(), "把检索到的关键数据写入事实账本。每得到一条可用数据就立即入账（不要攒到最后批量补）；最终答案的数据以账本为准。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "facts", Map.of("type", "array", "description", "本次入账的事实数组",
                                         "items", Map.of("type", "object",
                                                 "properties", Map.of(
-                                                        "dimension", Map.of("type", "string",
-                                                                "description", "指标维度，如 GDP增速、常住人口"),
-                                                        "period", Map.of("type", "string",
-                                                                "description", "时期，如 2024、2024-Q1、2024-H1、2024-Q1-3（前三季度）"),
-                                                        "metric", Map.of("type", "string",
-                                                                "description", "统计口径，如 规模以上工业；单一口径可留空"),
-                                                        "value", Map.of("type", "string",
-                                                                "description", "数值含单位，如 34606亿元、+5.1%；not_found 留空"),
+                                                        "fact", Map.of("type", "string",
+                                                                "description", "一条写清指标、时期、数值、口径的数据描述，如「杭州 2024 年 GDP 22062 亿元（初步核算）」"),
                                                         "source", Map.of("type", "string",
-                                                                "description", "来源链接或来源名；not_found 可留空"),
-                                                        "status", Map.of("type", "string",
-                                                                "enum", List.of("found", "proxy", "not_found"),
-                                                                "description", "数据状态"),
+                                                                "description", "来源链接或来源名"),
                                                         "note", Map.of("type", "string",
-                                                                "description", "口径说明/折算方法；not_found 时写已尝试的检索关键词与来源"),
-                                                        "target", Map.of("type", "string",
-                                                                "description", "对应 required_facts 的 id（如 rf1），本事实覆盖哪个覆盖目标；可空"),
-                                                        "tier", Map.of("type", "string",
-                                                                "enum", List.of("official", "third"),
-                                                                "description", "来源层级：official=数据发布方自己的网站/公报/附件原文；third=聚合站、转载媒体。目标声明 tier=official 时只有 official+found 能覆盖")),
-                                                "required", List.of("dimension", "period", "status")))),
+                                                                "description", "补充说明，可选")),
+                                                "required", List.of("fact")))),
                         "required", List.of("facts")));
     }
 
@@ -72,67 +48,23 @@ public class RecordFactsTool implements AgentTool {
     public String execute(JsonNode input) {
         JsonNode arr = input.path("facts");
         if (!arr.isArray() || arr.isEmpty()) {
-            return "参数 facts 必须是非空数组，每项含 dimension、period、status（可选 metric/value/source/note）";
+            return "参数 facts 必须是非空数组，每项含 fact（可选 source/note）";
         }
-        List<String> rejected = new ArrayList<>();
         int accepted = 0;
         for (JsonNode n : arr) {
-            String dimension = ToolRegistry.optStr(n, "dimension");
-            String period = ToolRegistry.optStr(n, "period");
-            String status = normalize(ToolRegistry.optStr(n, "status"));
-            String note = ToolRegistry.optStr(n, "note");
-            if (dimension == null || period == null) {
-                rejected.add("缺 dimension 或 period: " + abbreviate(n));
+            String fact = ToolRegistry.optStr(n, "fact");
+            if (fact == null || fact.isBlank()) {
                 continue;
             }
-            if (status == null) {
-                rejected.add("status 无效（可选 found/proxy/not_found）: " + abbreviate(n));
-                continue;
-            }
-            if ("not_found".equals(status) && (note == null || note.isBlank())) {
-                rejected.add("[" + dimension + "@" + period + "] not_found 必须在 note 写明已尝试的检索关键词与来源");
-                continue;
-            }
-            facts.record(new FactsStore.Fact(dimension, period,
-                    orEmpty(ToolRegistry.optStr(n, "metric")),
-                    orEmpty(ToolRegistry.optStr(n, "value")),
+            facts.record(new FactsStore.Fact(fact,
                     orEmpty(ToolRegistry.optStr(n, "source")),
-                    status, orEmpty(note),
-                    ToolRegistry.optStr(n, "target"),
-                    normalizeTier(ToolRegistry.optStr(n, "tier"))));
+                    orEmpty(ToolRegistry.optStr(n, "note"))));
             accepted++;
         }
-        StringBuilder sb = new StringBuilder("已入账 ").append(accepted).append(" 条");
-        if (!rejected.isEmpty()) {
-            sb.append("；被拒绝 ").append(rejected.size()).append(" 条:\n").append(String.join("\n", rejected));
-        }
-        return sb.append('\n').append(facts.coverageLine()).toString();
-    }
-
-    /** 状态归一：空白默认 found（大多数入账是刚检索到的可用数据）。 */
-    private static String normalize(String status) {
-        if (status == null || status.isBlank()) {
-            return "found";
-        }
-        String s = status.strip();
-        return STATUSES.contains(s) ? s : null;
+        return "已入账 " + accepted + " 条（账本共 " + facts.size() + " 条）";
     }
 
     private static String orEmpty(String s) {
         return s == null ? "" : s.strip();
-    }
-
-    /** 来源层级归一：仅认 official/third，缺省或拼错按未声明（""）处理。 */
-    private static String normalizeTier(String tier) {
-        if (tier == null || tier.isBlank()) {
-            return "";
-        }
-        String t = tier.strip().toLowerCase(Locale.ROOT);
-        return "official".equals(t) || "third".equals(t) ? t : "";
-    }
-
-    private static String abbreviate(JsonNode n) {
-        String one = n.toString().replaceAll("\\s+", " ");
-        return one.length() <= 200 ? one : one.substring(0, 200) + "…";
     }
 }
