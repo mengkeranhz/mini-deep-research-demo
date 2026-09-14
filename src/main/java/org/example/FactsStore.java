@@ -16,16 +16,18 @@ import java.util.Map;
  */
 public class FactsStore {
 
-    /** 覆盖目标：id 稳定（rf1、rf2…），dimension 仅作展示标签，periods 可随重规划追加。 */
-    public record Target(String id, String dimension, List<String> periods) {}
+    /** 覆盖目标：id 稳定（rf1、rf2…），dimension 仅作展示标签，periods 可随重规划追加；
+     *  tier="official" 表示只认官方一手来源（found 且 tier=official 才覆盖，not_found 声明仍可逃生）。 */
+    public record Target(String id, String dimension, List<String> periods, String tier) {}
 
     /** 声明结果：id 为该维度稳定 id；newTarget 表示本次是否新建目标；addedPeriods 为本次新增的时期。 */
     public record Requirement(String id, boolean newTarget, List<String> addedPeriods) {}
 
     /** 单条事实：status 为 found（官方/已核验）、proxy（代理指标或第三方折算）、not_found（检索未得的缺口声明）；
-     *  target 指向覆盖目标 id（可空，空则退回维度规范化匹配）。 */
+     *  target 指向覆盖目标 id（可空，空则退回维度规范化匹配）；
+     *  tier 为来源层级 official/third（可空），仅当覆盖目标声明 tier=official 时参与覆盖判定。 */
     public record Fact(String dimension, String period, String metric, String value,
-                       String source, String status, String note, String target) {}
+                       String source, String status, String note, String target, String tier) {}
 
     /** 覆盖目标：key = dimension.strip()，value = 目标（含稳定 id）。 */
     private final Map<String, Target> targets = new LinkedHashMap<>();
@@ -34,8 +36,9 @@ public class FactsStore {
     private int nextTargetId = 1;
 
     /** 声明（或追加）某维度需覆盖的时期；返回稳定 id 与本次增量（新建目标/新增时期），
-     *  供调用方在重规划时只回显增量目标，防止全量重复申报导致覆盖目标无限膨胀。空白与重复时期忽略。 */
-    public Requirement require(String dimension, List<String> periods) {
+     *  供调用方在重规划时只回显增量目标，防止全量重复申报导致覆盖目标无限膨胀。空白与重复时期忽略。
+     *  tier 仅 "official" 原样存（只认官方一手来源），其余归一为 ""；已有目标重声明时可升级为 official、不降级。 */
+    public Requirement require(String dimension, List<String> periods, String tier) {
         if (dimension == null || dimension.isBlank()) {
             return null;
         }
@@ -43,7 +46,10 @@ public class FactsStore {
         Target t = targets.get(d);
         boolean newTarget = t == null;
         if (newTarget) {
-            t = new Target("rf" + nextTargetId++, d, new ArrayList<>());
+            t = new Target("rf" + nextTargetId++, d, new ArrayList<>(), "official".equals(tier) ? "official" : "");
+            targets.put(d, t);
+        } else if ("official".equals(tier) && !"official".equals(t.tier())) {
+            t = new Target(t.id(), t.dimension(), t.periods(), "official"); // 升级不降级：重声明明确要求官方时收紧
             targets.put(d, t);
         }
         List<String> added = new ArrayList<>();
@@ -57,13 +63,14 @@ public class FactsStore {
         return new Requirement(t.id(), newTarget, added);
     }
 
-    /** 入账一条事实（同 key 覆盖），返回是否新增或更新了内容。target 指向未知 id 时退回维度兜底。 */
+    /** 入账一条事实（同 key 覆盖，tier 不进 key——重记同格即覆盖），返回是否新增或更新了内容。
+     *  target 指向未知 id 时退回维度兜底。 */
     public boolean record(Fact f) {
         String rawTarget = f.target();
         String target = (rawTarget != null && targets.values().stream().noneMatch(t -> t.id().equals(rawTarget)))
                 ? null : rawTarget; // 未知 target：退回维度规范化匹配，避免错误引用导致覆盖丢失
         Fact normalized = new Fact(f.dimension(), f.period(), f.metric(), f.value(),
-                f.source(), f.status(), f.note(), target);
+                f.source(), f.status(), f.note(), target, f.tier());
         Fact old = facts.put(key(f.dimension(), f.period(), f.metric()), normalized);
         return !normalized.equals(old);
     }
@@ -86,6 +93,9 @@ public class FactsStore {
             }
             sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
                     .append(" (").append(f.status()).append(")");
+            if ("official".equals(f.tier())) {
+                sb.append("[官方]");
+            }
             if (f.target() != null) {
                 sb.append(" → ").append(f.target());
             }
@@ -134,6 +144,9 @@ public class FactsStore {
             }
             sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
                     .append(" | ").append(f.status());
+            if ("official".equals(f.tier())) {
+                sb.append(" [官方]");
+            }
             if (f.target() != null) {
                 sb.append(" | 目标: ").append(f.target());
             }
@@ -150,12 +163,14 @@ public class FactsStore {
 
     /**
      * 终答硬闸门：返回缺口清单（null 表示通过，无目标或有目标且全覆盖均算通过）。
-     * 缺口两类：覆盖目标要求但账本无任何记录的时期；not_found 声明未写明检索方式（放弃过早）。
+     * 缺口两类：覆盖目标要求但账本无有效记录的时期（official 目标缺口单独说明来源要求）；not_found 声明未写明检索方式（放弃过早）。
      */
     public String gateReport() {
         List<String> gaps = new ArrayList<>();
-        for (String m : missingPeriods()) {
-            gaps.add(m + "：覆盖目标要求但账本中无任何记录");
+        for (Missing m : missing()) {
+            boolean official = "official".equals(m.t().tier());
+            gaps.add(m.t().id() + "@" + m.p() + "（" + m.t().dimension() + (official ? "，要求官方来源" : "") + "）"
+                    + (official ? "：仅有第三方值或无记录" : "：覆盖目标要求但账本中无任何记录"));
         }
         for (Fact f : facts.values()) {
             if ("not_found".equals(f.status()) && f.note().isBlank()) {
@@ -185,29 +200,52 @@ public class FactsStore {
         }
     }
 
-    /** 覆盖目标中尚无任何事实入账的「id@时期（维度）」列表。 */
+    /** 覆盖目标中尚无有效事实覆盖的「目标×时期」对（official 目标被第三方值占据也算缺口）。 */
+    private record Missing(Target t, String p) {}
+
+    /** 覆盖目标中尚无有效事实覆盖的「id@时期（维度[，要求官方来源]）」列表，快照与覆盖度行共用。 */
     private List<String> missingPeriods() {
         List<String> missing = new ArrayList<>();
+        for (Missing m : missing()) {
+            missing.add(m.t().id() + "@" + m.p() + "（" + m.t().dimension()
+                    + ("official".equals(m.t().tier()) ? "，要求官方来源" : "") + "）");
+        }
+        return missing;
+    }
+
+    private List<Missing> missing() {
+        List<Missing> missing = new ArrayList<>();
         for (Target t : targets.values()) {
             for (String p : t.periods()) {
                 boolean hit = facts.values().stream().anyMatch(f -> covers(t, p, f));
                 if (!hit) {
-                    missing.add(t.id() + "@" + p + "（" + t.dimension() + "）");
+                    missing.add(new Missing(t, p));
                 }
             }
         }
         return missing;
     }
 
-    /** 判断事实 f 是否覆盖目标 t 的时期 p：优先 target id，未填 target 时退回维度规范化匹配。 */
-    private static boolean covers(Target t, String p, Fact f) {
+    /** 判断事实 f 是否覆盖目标 t 的时期 p：优先 target id，未填 target 时退回维度规范化匹配。
+     *  分层覆盖：not_found 缺口声明始终视为已处理（逃生舱，防官方目标死锁）；
+     *  tier=official 的目标只认 found 且来源为官方（tier=official）的事实，第三方聚合/转载不覆盖。 */
+    static boolean covers(Target t, String p, Fact f) {
         if (!p.equals(f.period())) {
             return false;
         }
-        if (f.target() != null) {
-            return t.id().equals(f.target());
+        boolean idMatch = f.target() != null
+                ? t.id().equals(f.target())
+                : canonical(t.dimension()).equals(canonical(f.dimension()));
+        if (!idMatch) {
+            return false;
         }
-        return canonical(t.dimension()).equals(canonical(f.dimension()));
+        if ("not_found".equals(f.status())) {
+            return true;
+        }
+        if ("official".equals(t.tier())) {
+            return "found".equals(f.status()) && "official".equals(f.tier());
+        }
+        return true;
     }
 
     /** 维度规范化（纯结构，不背题）：去括号限定、去空白、英文小写。覆盖匹配的兜底路径。 */

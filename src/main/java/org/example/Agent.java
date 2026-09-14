@@ -6,9 +6,9 @@ import java.util.Locale;
 
 /**
  * Agent loop（对应方案 7 步）：
- * 轮次上限 → 注入任务进度与事实账本快照 → LLM（人格 + 工具元信息 + 对话与思考）→
+ * 轮次上限 → 注入任务进度、事实账本与工程备忘快照 → LLM（人格 + 工具元信息 + 对话与思考）→
  * 无工具调用时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
- * 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本）。
+ * 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本与工程备忘）。
  */
 public class Agent {
     static final int MAX_ROUNDS = 120;
@@ -22,6 +22,7 @@ public class Agent {
             你是答案质量校验器。对照「校验依据」检查「草稿回答」：
             1. 所有硬约束是否满足；2. 信息缺口是否已说明或给出合理假设；3. 关键事实是否有来源、是否可信；4. 是否仍有未完成、未核实或答非所问之处。
             5. 与「事实账本」逐条核对：草稿中每个数据、时期与结论是否与已入账事实一致；草稿声称「未找到/未检索到 X」而账本中 X 为 found/proxy，或账本中 X 为 found 而草稿遗漏 X，均为缺陷。
+               覆盖目标要求官方来源（tier=official）的时期，草稿使用第三方数值而账本中既无 official 值也无 not_found 声明的，为缺陷。
             6. 账本中 status=not_found 的条目：草稿是否如实说明该缺口；其 note 是否写明已尝试的检索方式（未写明视为放弃过早）。
             输出格式：第一行只能是下列三选一，其后为逐条缺陷（每行一条，具体、可执行）：
             - PASS：已满足约束且质量足够（只输出这一行，不要附其他内容）。
@@ -36,6 +37,7 @@ public class Agent {
     private final ToolRegistry registry;
     private final TaskStore tasks;
     private final FactsStore facts;
+    private final NotesStore notes;
 
     public Agent() {
         this.cfg = Config.load();
@@ -44,7 +46,8 @@ public class Agent {
                 cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
         this.tasks = new TaskStore();
         this.facts = new FactsStore();
-        this.registry = new ToolRegistry(cfg, tasks, facts);
+        this.notes = new NotesStore();
+        this.registry = new ToolRegistry(cfg, tasks, facts, notes);
     }
 
     public String run(String request) {
@@ -58,18 +61,22 @@ public class Agent {
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
 
-            // LLM 看不到 TaskStore / FactsStore 外部状态 → 每轮重算任务进度与事实账本快照，
+            // LLM 看不到 TaskStore / FactsStore / NotesStore 外部状态 → 每轮重算任务进度、事实账本与工程备忘快照，
             // 作为新系统块注入（人格之后、对话之前）；只放进本次调用的副本，messages 不留旧快照，
             // 天然无陈旧堆积、压缩重建也无需处理。账本快照带覆盖缺口，逼模型补齐而非提前收工
             String snapshot = tasks.snapshot();
             String factsSnapshot = facts.snapshot();
+            String notesSnapshot = notes.snapshot();
             List<Msg> callMessages = messages;
-            if (snapshot != null || factsSnapshot != null) {
+            if (snapshot != null || factsSnapshot != null || notesSnapshot != null) {
                 if (snapshot != null) {
                     System.out.println(Console.header("[任务快照已注入] ") + tasks.progress());
                 }
                 if (factsSnapshot != null) {
                     System.out.println(Console.header("[事实账本已注入] ") + facts.coverageLine());
+                }
+                if (notesSnapshot != null) {
+                    System.out.println(Console.header("[工程备忘已注入] ") + notes.size() + " 条");
                 }
                 callMessages = new ArrayList<>(messages);
                 int injectAt = 1;
@@ -77,7 +84,10 @@ public class Agent {
                     callMessages.add(injectAt++, Msg.system(snapshot));
                 }
                 if (factsSnapshot != null) {
-                    callMessages.add(injectAt, Msg.system(factsSnapshot));
+                    callMessages.add(injectAt++, Msg.system(factsSnapshot));
+                }
+                if (notesSnapshot != null) {
+                    callMessages.add(injectAt, Msg.system(notesSnapshot));
                 }
             }
 
@@ -122,10 +132,11 @@ public class Agent {
                             messages.add(Msg.assistant(resp.blocks()));
                             messages.add(Msg.user("最终回答前检查发现以下数据覆盖缺口：\n" + gaps
                                     + "\n\n请逐项处理后再【重新输出完整的最终回答】：\n"
-                                    + "1. 继续检索（换关键词、换统计口径、换来源）并用 record_facts 入账（target 填缺口对应的 required_facts id，如 rf1）；\n"
+                                    + "1. 继续检索补齐缺口（可换关键词、换口径、换来源或换获取方式），"
+                                    + "结果用 record_facts 入账（target 填缺口对应的 required_facts id，如 rf1）；\n"
                                     + "2. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
                                     + "3. 确认检索不到的，用 record_facts 声明 status=not_found，"
-                                    + "note 写明已尝试的检索关键词与来源，并在最终答案中如实说明该缺口。"));
+                                    + "note 写明已尝试的检索方式，并在最终答案中如实说明该缺口。"));
                             transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
                             continue;
                         } else {
@@ -144,7 +155,8 @@ public class Agent {
                         System.out.println("\n[最终校验] 信息缺口，触发重规划：\n" + verdict);
                         messages.add(Msg.assistant(resp.blocks()));
                         messages.add(Msg.user("你的回答未通过最终校验，存在以下信息缺口：\n" + verdict
-                                + "\n\n请先调用 analyze_query 重新规划（新增的检索目标写入 required_facts），"
+                                + "\n\n请先调用 analyze_query 重新规划（新增的检索目标写入 required_facts）。"
+                                + "当前检索方式走不通时，新计划应改用其他获取方式；工程发现随手 record_note。"
                                 + "补齐缺陷后【重新输出完整的最终回答】——不要只输出补丁或缺失部分，"
                                 + "必须覆盖问题要求的全部维度与时期；新检索到的数据先 record_facts 入账再作答，"
                                 + "答案数据一律以事实账本为准。"));
@@ -197,6 +209,12 @@ public class Agent {
                     rebuilt.append("\n\n【事实账本：已检索入账的结构化数据，最终权威依据】\n")
                             .append(ledger)
                             .append("最终答案的全部数据必须与账本一致；摘要或旧草稿与账本冲突时，以账本为准。");
+                }
+                // 工程状态随账本一起跨压缩保留：接口/参数/文件路径丢了就要重新逆向探索
+                String notesText = notes.snapshot();
+                if (notesText != null) {
+                    rebuilt.append("\n\n【工程备忘：已记录的关键工程状态，继续探索与复用时以此为准】\n")
+                            .append(notesText);
                 }
                 if (bestAnswer != null && !bestAnswer.isBlank()) {
                     rebuilt.append("\n\n【旧答案草稿：仅供结构参考，其中与事实账本冲突或账本已更新的数据必须重写】\n")

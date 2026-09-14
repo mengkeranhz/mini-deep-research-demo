@@ -8,6 +8,7 @@ import org.example.ToolRegistry.AgentTool;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -36,7 +37,8 @@ public class RecordFactsTool implements AgentTool {
                         + "（不要攒到最后批量补）；最终答案的全部数据必须来自账本。"
                         + "status: found=官方或已交叉核验；proxy=代理指标/第三方折算（note 写折算方法）；"
                         + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。"
-                        + "target 填对应 required_facts 的 id（如 rf1），用于覆盖度匹配；对不上可留空。",
+                        + "target 填对应 required_facts 的 id（如 rf1），用于覆盖度匹配；对不上可留空。"
+                        + "官方一手来源记得填 tier=official。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "facts", Map.of("type", "array", "description", "本次入账的事实数组",
@@ -58,7 +60,10 @@ public class RecordFactsTool implements AgentTool {
                                                         "note", Map.of("type", "string",
                                                                 "description", "口径说明/折算方法；not_found 时写已尝试的检索关键词与来源"),
                                                         "target", Map.of("type", "string",
-                                                                "description", "对应 required_facts 的 id（如 rf1），本事实覆盖哪个覆盖目标；可空")),
+                                                                "description", "对应 required_facts 的 id（如 rf1），本事实覆盖哪个覆盖目标；可空"),
+                                                        "tier", Map.of("type", "string",
+                                                                "enum", List.of("official", "third"),
+                                                                "description", "来源层级：official=数据发布方自己的网站/公报/附件原文；third=聚合站、转载媒体。目标声明 tier=official 时只有 official+found 能覆盖")),
                                                 "required", List.of("dimension", "period", "status")))),
                         "required", List.of("facts")));
     }
@@ -93,7 +98,8 @@ public class RecordFactsTool implements AgentTool {
                     orEmpty(ToolRegistry.optStr(n, "value")),
                     orEmpty(ToolRegistry.optStr(n, "source")),
                     status, orEmpty(note),
-                    ToolRegistry.optStr(n, "target")));
+                    ToolRegistry.optStr(n, "target"),
+                    normalizeTier(ToolRegistry.optStr(n, "tier"))));
             accepted++;
         }
         StringBuilder sb = new StringBuilder("已入账 ").append(accepted).append(" 条");
@@ -114,6 +120,15 @@ public class RecordFactsTool implements AgentTool {
 
     private static String orEmpty(String s) {
         return s == null ? "" : s.strip();
+    }
+
+    /** 来源层级归一：仅认 official/third，缺省或拼错按未声明（""）处理。 */
+    private static String normalizeTier(String tier) {
+        if (tier == null || tier.isBlank()) {
+            return "";
+        }
+        String t = tier.strip().toLowerCase(Locale.ROOT);
+        return "official".equals(t) || "third".equals(t) ? t : "";
     }
 
     private static String abbreviate(JsonNode n) {

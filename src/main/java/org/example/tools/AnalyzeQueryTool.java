@@ -39,9 +39,14 @@ public class AnalyzeQueryTool implements AgentTool {
               时期逐项枚举全（这会成为最终答案的覆盖度检查表，漏枚举即漏答）；粒度跟随数据实际发布口径——
               季度指标逐年逐季列出（如 ["2024","2024-Q1","2024-Q2","2024-Q3","2024-Q4",...]），
               年度指标只列年份；非时间序列数据用自然时期（如 ["国庆假期"]）。
-            - tasks: 3-6 个可执行任务，每项 {"content": "一次工具调用可完成的动作", "depends_on": [前置任务的序号，从 1 起]}
-            示例（输入「查深圳最近2年每季度的GDP增速和新能源汽车保有量」）：
-            {"constraints":["地区：深圳","时间范围：最近2年","频率：季度"],"unknowns":["新能源汽车保有量是否只按年度发布"],"plan":"先确认各指标发布频率与口径，再按各自粒度检索","required_facts":[{"dimension":"GDP增速","periods":["2024","2024-Q1","2024-Q2","2024-Q3","2024-Q4","2025","2025-Q1","2025-Q2","2025-Q3","2025-Q4"]},{"dimension":"新能源汽车保有量","periods":["2024","2025"]}],"tasks":[{"content":"查深圳GDP季度增速官方数据","depends_on":[]},{"content":"查深圳新能源汽车保有量年度数据","depends_on":[]},{"content":"汇总对比两项指标变化","depends_on":[1,2]}]}
+              每项可带 "tier": "official"——官方例行发布的核心指标（统计公报、月报等）建议声明：
+              该目标只认官方一手来源（record_facts 需 status=found 且 tier=official 才覆盖），
+              第三方聚合/转载不覆盖；官方确实无此口径/未发布的，用 not_found 声明后在 note 写代理指标即可。
+              非官方口径的维度（代理指标本身）省略 tier。
+            - tasks: 3-6 个可执行任务，每项 {"content": "一个可独立推进的执行步骤", "depends_on": [前置任务的序号，从 1 起]}。
+              任务按数据获取方式组织：检索能解决的写检索任务，检索拿不到的写工程任务（run_code），不要都规划成换关键词的搜索。
+            示例（输入「查比亚迪最近2年每季度的营业收入和员工人数」）：
+            {"constraints":["主体：比亚迪","时间范围：最近2年","频率：季度"],"unknowns":["员工人数是否只在年报披露"],"plan":"先确认两项指标的披露频率与口径，再按各自粒度检索","required_facts":[{"dimension":"营业收入","periods":["2025","2025-Q1","2025-Q2","2025-Q3","2025-Q4","2026","2026-Q1","2026-Q2","2026-Q3","2026-Q4"],"tier":"official"},{"dimension":"员工人数","periods":["2025","2026"]}],"tasks":[{"content":"查比亚迪季报中的营业收入","depends_on":[]},{"content":"查比亚迪年报中的员工人数","depends_on":[]},{"content":"汇总对比两项指标变化","depends_on":[1,2]}]}
             """;
 
     private final Config.Llm llmCfg;
@@ -64,6 +69,7 @@ public class AnalyzeQueryTool implements AgentTool {
         return new ToolDef(name(), "分析用户述求：识别硬约束与信息缺口，给出总体计划并拆解为带依赖的任务清单（JSON）。"
                         + "required_facts 每项会被分配稳定 id（rf1、rf2…），record_facts 用 target 引用；"
                         + "重规划时只声明新增的覆盖目标，已有目标不要重复声明。"
+                        + "任务按数据获取方式组织：检索能解决的写检索任务，检索拿不到的可安排工程任务（run_code）。"
                         + "初始规划或执行中发现新信息、需要新任务时随时可调用；重规划会基于当前进度、复用已完成结论。"
                         + "生成的任务状态每轮以系统快照自动注入。",
                 Map.of("type", "object",
@@ -133,7 +139,8 @@ public class AnalyzeQueryTool implements AgentTool {
         // 返回值都不膨胀，覆盖缺口才可能收敛归零，避免「每次重规划都长出新目标」的死循环
         ArrayNode rfs = M.createArrayNode();
         for (JsonNode rf : root.path("required_facts")) {
-            FactsStore.Requirement r = facts.require(rf.path("dimension").asText(null), strList(rf.path("periods")));
+            FactsStore.Requirement r = facts.require(rf.path("dimension").asText(null), strList(rf.path("periods")),
+                    rf.path("tier").asText(""));
             if (r == null || (!r.newTarget() && r.addedPeriods().isEmpty())) {
                 continue;
             }
@@ -163,9 +170,7 @@ public class AnalyzeQueryTool implements AgentTool {
         }
         return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
                 + "\n任务清单已保存；required_facts 仅含本次新增的覆盖目标（无新增时不列出，已有目标在事实账本中保持不变）。"
-                + "请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
-                + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径，target 填对应 required_facts 的 id），"
-                + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。";
+                + "请从「可执行」的任务开始执行。";
     }
 
     /** 剥掉可能的围栏与说明文字：取首个 { 到末个 } 的片段解析。 */
