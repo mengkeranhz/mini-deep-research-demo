@@ -21,11 +21,9 @@ import java.util.Map;
 public class ReadFileTool implements AgentTool {
 
     private final Path root;
-    private final int maxResults;
 
-    public ReadFileTool(Config.Storage storage, Config.ReadFile readFile) {
+    public ReadFileTool(Config.Storage storage) {
         this.root = Config.rootDir(storage);
-        this.maxResults = Math.max(1, readFile.maxResults());
     }
 
     @Override
@@ -42,6 +40,8 @@ public class ReadFileTool implements AgentTool {
                                 "path", Map.of("type", "string", "description", "文件路径（相对路径相对于根目录解析）"),
                                 "offset", Map.of("type", "integer", "description", "起始行号（0 起），默认 0"),
                                 "limit", Map.of("type", "integer", "description", "返回行数，默认 200"),
+                                "max-results", Map.of("type", "integer",
+                                        "description", "关键词检索时最多返回的段落数，默认 30"),
                                 "keywords", Map.of("type", "array",
                                         "items", Map.of("type", "string"),
                                         "description", "关键词列表，返回命中这些关键词的完整段落（命中关键词更多的段落优先）")),
@@ -57,6 +57,7 @@ public class ReadFileTool implements AgentTool {
                 ? ToolRegistry.strList(input, "keywords").stream().filter(k -> !k.isBlank()).toList()
                 : List.of();
         if (!keywords.isEmpty()) {
+            int maxResults = Math.max(1, ToolRegistry.optInt(input, "max-results", 30));
             return searchByKeywords(path, lines, keywords, maxResults);
         }
 

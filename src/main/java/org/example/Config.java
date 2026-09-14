@@ -20,7 +20,7 @@ public final class Config {
     public record Llm(String provider, String baseUrl, String model, String apiKey,
                       int maxTokens, double temperature, boolean streaming) {}
 
-    public record WebSearch(String tavilyApiKey, int maxResults) {}
+    public record WebSearch(String tavilyApiKey) {}
 
     /** minRequestIntervalMs：相邻两次高德请求的最小间隔（毫秒），防 QPS 超限。 */
     public record Lbs(String amapApiKey, int minRequestIntervalMs) {}
@@ -28,11 +28,8 @@ public final class Config {
     /** 文件保存/读取根目录。rootDir 为空时回退：工作目录 → 项目目录。 */
     public record Storage(String rootDir) {}
 
-    /** read-file 工具：关键词检索默认返回的段落数。 */
-    public record ReadFile(int maxResults) {}
-
     /** 全量配置：llm + storage + tools 三段。 */
-    public record Data(Llm llm, WebSearch webSearch, Lbs lbs, Storage storage, ReadFile readFile) {}
+    public record Data(Llm llm, WebSearch webSearch, Lbs lbs, Storage storage) {}
 
     public static Data load() {
         Map<String, Object> root = new Yaml().load(expandEnv(readText()));
@@ -41,19 +38,15 @@ public final class Config {
         Map<String, Object> webSearch = asMap(tools.get("web-search"));
         Map<String, Object> lbs = asMap(tools.get("lbs-service"));
         Map<String, Object> storage = asMap(root.get("storage"));
-        Map<String, Object> readFile = asMap(tools.get("read-file"));
         return new Data(
                 new Llm(
                         str(llm, "provider"), str(llm, "base-url"), str(llm, "model"), str(llm, "api-key"),
                         intVal(llm, "max-tokens", 8192),
                         dblVal(llm, "temperature", 0),
                         boolVal(llm, "streaming", true)),
-                new WebSearch(
-                        str(webSearch, "tavily-api-key"),
-                        intVal(webSearch, "max-results", 5)),
+                new WebSearch(str(webSearch, "tavily-api-key")),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
-                new Storage(str(storage, "root-dir")),
-                new ReadFile(intVal(readFile, "max-results", 5)));
+                new Storage(str(storage, "root-dir")));
     }
 
     /** 文件根目录解析：显式配置 root-dir → 工作目录(user.dir) → 项目目录(code source 所在)。 */

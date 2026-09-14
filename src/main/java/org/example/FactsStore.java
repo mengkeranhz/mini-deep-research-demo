@@ -22,6 +22,11 @@ public class FactsStore {
         return !normalized.equals(facts.put(key(f.fact()), normalized));
     }
 
+    /** 删除一条事实（按 fact 文本压空白匹配），用于纠正错误入账；返回是否确实删除。 */
+    public boolean remove(String fact) {
+        return facts.remove(key(fact)) != null;
+    }
+
     public boolean isEmpty() {
         return facts.isEmpty();
     }

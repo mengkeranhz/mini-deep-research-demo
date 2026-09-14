@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
-/** web_search：Tavily 搜索 API（key 与 max-results 来自 config.yaml 的 tools.web-search）。 */
+/** web_search：Tavily 搜索 API（key 来自 config.yaml 的 tools.web-search；max-results 由 LLM 传参，缺省 30）。 */
 public class WebSearchTool implements AgentTool {
 
     private static final ObjectMapper M = new ObjectMapper();
@@ -33,10 +33,14 @@ public class WebSearchTool implements AgentTool {
     public ToolDef definition() {
         return new ToolDef(name(), "联网搜索，返回结果列表（标题/链接/内容摘要）。用于查找资料来源。",
                 Map.of("type", "object",
-                        "properties", Map.of("keywords", Map.of(
-                                "type", "array",
-                                "items", Map.of("type", "string"),
-                                "description", "搜索关键词，中英文均可")),
+                        "properties", Map.of(
+                                "keywords", Map.of(
+                                        "type", "array",
+                                        "items", Map.of("type", "string"),
+                                        "description", "搜索关键词，中英文均可"),
+                                "max-results", Map.of(
+                                        "type", "integer",
+                                        "description", "返回结果数，默认 30")),
                         "required", List.of("keywords")));
     }
 
@@ -46,8 +50,9 @@ public class WebSearchTool implements AgentTool {
             throw new IllegalStateException("未配置 tavily-api-key（config.yaml 的 tools.web-search，对应环境变量 TAVILY_API_KEY）");
         }
         String query = String.join(" ", ToolRegistry.strList(input, "keywords"));
+        int maxResults = ToolRegistry.optInt(input, "max-results", 30);
         ObjectNode body = M.createObjectNode();
-        body.put("query", query).put("max_results", cfg.maxResults());
+        body.put("query", query).put("max_results", maxResults);
 
         Http.Response resp = Http.post(API, Map.of("Authorization", "Bearer " + cfg.tavilyApiKey()),
                 M.writeValueAsString(body));
