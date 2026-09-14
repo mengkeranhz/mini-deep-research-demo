@@ -18,20 +18,22 @@ public class TaskStore {
     private String plan;
     private List<String> constraints = List.of();
     private List<String> unknowns = List.of();
+    private List<String> coreNeeds = List.of();
     private final List<Task> tasks = new ArrayList<>();
 
     /** 写入新任务清单（重复调用即重新规划；goal 为本次分析的目标述求，基线随之更新，
-     *  约束与未知随本次分析整体替换）。
+     *  约束、未知与核心述求随本次分析整体替换）。
      *  重规划保留已完成状态：新任务按内容匹配旧任务，done 的继承 done（含备注），
      *  避免重规划把进度清零导致重复劳动。 */
     public void reset(String goal, String plan, List<String> constraints, List<String> unknowns,
-                      List<Task> newTasks) {
+                      List<String> coreNeeds, List<Task> newTasks) {
         if (goal != null && !goal.isBlank()) {
             this.goal = goal.strip();
         }
         this.plan = plan;
         this.constraints = constraints == null ? List.of() : List.copyOf(constraints);
         this.unknowns = unknowns == null ? List.of() : List.copyOf(unknowns);
+        this.coreNeeds = coreNeeds == null ? List.of() : List.copyOf(coreNeeds);
         Map<String, Task> doneByContent = new LinkedHashMap<>();
         for (Task t : tasks) {
             if ("done".equals(t.status())) {
@@ -79,6 +81,11 @@ public class TaskStore {
         return goal;
     }
 
+    /** 核心述求（最近一次规划解析出的要点），最终校验逐条核对。 */
+    public List<String> coreNeeds() {
+        return coreNeeds;
+    }
+
     /** 每轮重算的紧凑进度快照：计划 + 进度统计 + 逐任务行。 */
     public String snapshot() {
         if (tasks.isEmpty()) {
@@ -96,6 +103,9 @@ public class TaskStore {
         }
         if (!unknowns.isEmpty()) {
             sb.append("未知: ").append(String.join("、", unknowns)).append('\n');
+        }
+        if (!coreNeeds.isEmpty()) {
+            sb.append("核心述求: ").append(String.join("、", coreNeeds)).append('\n');
         }
         sb.append("进度: ").append(progress()).append('\n');
         for (Task t : tasks) {

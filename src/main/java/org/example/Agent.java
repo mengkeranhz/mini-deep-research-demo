@@ -21,8 +21,8 @@ public class Agent {
 
     /** 最终校验提示词：对照任务述求、计划与事实账本检查草稿，首行 PASS / FAIL，其后逐条缺陷。 */
     private static final String VERIFY_PROMPT = """
-            你是答案校验器。对照「任务述求」「计划」「事实账本」检查「草稿回答」：
-            1. 述求与计划是否完成：不答非所问；计划中未完成的任务、未解决的未知，草稿未处理且未说明原因的算缺陷；如实说明经充分尝试仍不可得并给出原因或替代方案的，不算缺陷。
+            你是答案校验器。对照「任务述求」「核心述求」「计划」「事实账本」检查「草稿回答」：
+            1. 述求与计划是否完成：不答非所问；核心述求逐条核对，草稿未回答到位的算缺陷；计划中未完成的任务、未解决的未知，草稿未处理且未说明原因的算缺陷；如实说明经充分尝试仍不可得并给出原因或替代方案的，不算缺陷。
             2. 是否遵守计划中的约束。
             3. 数据与结论是否与账本一致：账本已有而草稿遗漏、数值与账本不符、草稿声称未找到而账本已有，均算缺陷。
             4. 关键事实是否附有来源。
@@ -107,7 +107,7 @@ public class Agent {
                 if (!candidate.isBlank() && (ledger != null || plan != null)) {
                     // 校验对照当前基线：未重规划过即原始述求，重规划调整后以最新目标为准
                     String baseline = tasks.goal() != null ? tasks.goal() : request;
-                    Verdict verdict = verify(baseline, plan, ledger, candidate);
+                    Verdict verdict = verify(baseline, tasks.coreNeeds(), plan, ledger, candidate);
                     if (!verdict.pass()) {
                         String defects = String.join("\n", verdict.defects());
                         System.out.println("\n[最终校验] 未通过：\n" + defects);
@@ -197,8 +197,8 @@ public class Agent {
     private record Verdict(boolean pass, List<String> defects) {}
 
     /** 最终校验：quiet 客户端对照述求、计划与账本检查草稿，返回结构化判定；解析失败重试一次后仍失败则放行，避免死循环。 */
-    private Verdict verify(String goal, String plan, String ledger, String draft) {
-        String q = buildVerifyQuery(goal, plan, ledger, draft);
+    private Verdict verify(String goal, List<String> coreNeeds, String plan, String ledger, String draft) {
+        String q = buildVerifyQuery(goal, coreNeeds, plan, ledger, draft);
         Verdict v = parseVerdict(quietLlm.call(List.of(), List.of(Msg.system(VERIFY_PROMPT), Msg.user(q))).text());
         if (v != null) {
             return v;
@@ -211,9 +211,12 @@ public class Agent {
         return v2 != null ? v2 : new Verdict(true, List.of());
     }
 
-    /** 组装校验对照内容：述求 + 计划 + 账本 + 草稿。 */
-    private static String buildVerifyQuery(String goal, String plan, String ledger, String draft) {
+    /** 组装校验对照内容：述求 + 核心述求 + 计划 + 账本 + 草稿。 */
+    private static String buildVerifyQuery(String goal, List<String> coreNeeds, String plan, String ledger, String draft) {
         StringBuilder q = new StringBuilder("任务述求：\n").append(goal);
+        if (coreNeeds != null && !coreNeeds.isEmpty()) {
+            q.append("\n\n核心述求：\n").append(String.join("\n", coreNeeds));
+        }
         if (plan != null && !plan.isBlank()) {
             q.append("\n\n计划与进度：\n").append(plan);
         }

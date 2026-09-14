@@ -33,6 +33,7 @@ public class AnalyzeQueryTool implements AgentTool {
             - plan: 一句话总体执行策略
             - constraints: 硬约束数组（时间、范围、口径、方式等明确限制），无则空数组
             - unknowns: 未知/待定点数组（用户未说清、需澄清或需做假设之处），无则空数组
+            - core_needs: 核心述求数组（用户最核心要回答的几个问题/要点，每条一句短语），无则空数组
             - tasks: 3-6 个可执行任务，每项为一个任务描述字符串。
               任务按数据获取方式组织：检索能解决的写检索任务，检索拿不到的写工程任务（run_code），不要都规划成换关键词的搜索。
             若提供了当前进度或事实账本：结合已知信息规划，只补剩余工作；目标需要调整时按调整后的目标给出。
@@ -98,13 +99,15 @@ public class AnalyzeQueryTool implements AgentTool {
         }
         List<String> constraints = strList(root.path("constraints"));
         List<String> unknowns = strList(root.path("unknowns"));
-        tasks.reset(query, root.path("plan").asText(""), constraints, unknowns, parsed);
+        List<String> coreNeeds = strList(root.path("core_needs"));
+        tasks.reset(query, root.path("plan").asText(""), constraints, unknowns, coreNeeds, parsed);
 
         // 归一化后的 JSON 回给模型（含任务 id 与继承后的真实状态——重声明原文的任务已是 done）
         ObjectNode out = M.createObjectNode();
         out.put("plan", root.path("plan").asText(""));
         out.set("constraints", M.valueToTree(constraints));
         out.set("unknowns", M.valueToTree(unknowns));
+        out.set("core_needs", M.valueToTree(coreNeeds));
         ArrayNode ts = out.putArray("tasks");
         for (TaskStore.Task t : tasks.all()) {
             ObjectNode o = ts.addObject();
