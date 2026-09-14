@@ -1,8 +1,10 @@
 package org.example;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * Agent loop：
@@ -17,18 +19,21 @@ public class Agent {
     /** 对话稿中每条工具结果正文的最大保留长度（足够保住数值与链接，又不让稿子膨胀）。 */
     static final int TRANSCRIPT_TOOL_BODY_LIMIT = 1_500;
 
-    /** 最终校验提示词：对照任务述求与事实账本检查草稿，首行 PASS / FAIL，其后逐条缺陷。 */
+    /** 最终校验提示词：对照任务述求、计划与事实账本检查草稿，首行 PASS / FAIL，其后逐条缺陷。 */
     private static final String VERIFY_PROMPT = """
-            你是答案校验器。对照「任务述求」与「事实账本」检查「草稿回答」：
-            1. 是否回答了述求所问：不答非所问，不遗漏要查的关键数据。草稿如实说明某数据经充分尝试仍不可得并给出原因或替代方案的，不算缺陷。
-            2. 草稿中每个数据、时期与结论是否与事实账本一致：账本已有而草稿遗漏、草稿数值与账本不符、
-               草稿声称未找到而账本中已有，均为缺陷。
-            3. 关键事实是否附有来源。
-            4. 若事实账本自身对同一指标、同一时期存在互相矛盾的事实（不同来源给出冲突数值），
-               这是账本问题而非草稿缺陷：草稿采用其中任一来源的数值，即不算「草稿数值与账本不符」；
-               草稿能点出该冲突并说明取舍（如采用更权威口径）更佳。仅当草稿数值与该指标在账本中的全部取值都不符时，才算缺陷。
-            输出格式：第一行只能是 PASS（通过则只输出这一行）或 FAIL，其后逐行列出缺陷（具体、可执行）。
+            你是答案校验器。对照「任务述求」「计划」「事实账本」检查「草稿回答」：
+            1. 述求与计划是否完成：不答非所问；计划中未完成的任务、未解决的未知，草稿未处理且未说明原因的算缺陷；如实说明经充分尝试仍不可得并给出原因或替代方案的，不算缺陷。
+            2. 是否遵守计划中的约束。
+            3. 数据与结论是否与账本一致：账本已有而草稿遗漏、数值与账本不符、草稿声称未找到而账本已有，均算缺陷。
+            4. 关键事实是否附有来源。
+            账本自身对同一指标、同一时期存在矛盾数值时不算草稿缺陷；草稿点出该矛盾并说明取舍更佳。
+            只输出一个 JSON 对象，不要解释、不要 markdown 围栏、不要任何其它文字：
+            - 通过：{"verdict":"PASS"}
+            - 不通过：{"verdict":"FAIL","defects":["缺陷1","缺陷2"]}，defects 至少一条，每条是一句可执行的修改意见。
             """;
+
+    /** 解析校验器 JSON 输出复用。 */
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final Config.Data cfg;
     private final LlmClient llm;
@@ -95,17 +100,19 @@ public class Agent {
             }
             if (toolCalls.isEmpty()) {
                 String candidate = resp.text();
-                // 最终校验：有账本时对照检查「结论 ↔ 过程」矛盾——
-                // 草稿说未找到而账本里有、账本有而草稿遗漏等在此拦截
+                // 最终校验：有账本或计划时对照检查「结论 ↔ 过程」矛盾——
+                // 草稿说未找到而账本里有、账本有而草稿遗漏、计划未完成或未知未解决等在此拦截
                 String ledger = facts.snapshot();
-                if (!candidate.isBlank() && ledger != null) {
+                String plan = tasks.snapshot();
+                if (!candidate.isBlank() && (ledger != null || plan != null)) {
                     // 校验对照当前基线：未重规划过即原始述求，重规划调整后以最新目标为准
                     String baseline = tasks.goal() != null ? tasks.goal() : request;
-                    String verdict = verify(baseline, ledger, candidate);
-                    if (!firstLine(verdict).toUpperCase(Locale.ROOT).startsWith("PASS")) {
-                        System.out.println("\n[最终校验] 未通过：\n" + verdict);
+                    Verdict verdict = verify(baseline, plan, ledger, candidate);
+                    if (!verdict.pass()) {
+                        String defects = String.join("\n", verdict.defects());
+                        System.out.println("\n[最终校验] 未通过：\n" + defects);
                         messages.add(Msg.assistant(resp.blocks()));
-                        messages.add(Msg.user("你的回答未通过最终校验，存在以下缺陷：\n" + verdict
+                        messages.add(Msg.user("你的回答未通过最终校验，存在以下缺陷：\n" + defects
                                 + "\n\n请修正后【重新输出完整的最终回答】——不要只输出补丁，"
                                 + "必须完整覆盖述求所问；必要时继续检索，新数据先 record_facts 入账。"));
                         transcript.append("助手: ").append(candidate).append('\n');
@@ -186,22 +193,72 @@ public class Agent {
         }
     }
 
-    /** 取校验器输出首行作为分类标签（PASS / FAIL）。 */
-    private static String firstLine(String text) {
-        if (text == null) {
-            return "";
+    /** 校验器结构化判定：pass=true 通过；pass=false 且 defects 非空则需修正。 */
+    private record Verdict(boolean pass, List<String> defects) {}
+
+    /** 最终校验：quiet 客户端对照述求、计划与账本检查草稿，返回结构化判定；解析失败重试一次后仍失败则放行，避免死循环。 */
+    private Verdict verify(String goal, String plan, String ledger, String draft) {
+        String q = buildVerifyQuery(goal, plan, ledger, draft);
+        Verdict v = parseVerdict(quietLlm.call(List.of(), List.of(Msg.system(VERIFY_PROMPT), Msg.user(q))).text());
+        if (v != null) {
+            return v;
         }
-        int i = text.indexOf('\n');
-        return (i < 0 ? text : text.substring(0, i)).strip();
+        // 未按格式输出：追加更明确的格式约束重试一次，仍解析不了就放行（避免空反馈死循环）
+        String raw = quietLlm.call(List.of(), List.of(Msg.system(VERIFY_PROMPT),
+                Msg.user(q + "\n\n上次你没有按格式输出 JSON。请只输出一个 JSON 对象：通过为 {\"verdict\":\"PASS\"}，"
+                        + "不通过为 {\"verdict\":\"FAIL\",\"defects\":[\"...\"]}，且 FAIL 时 defects 至少一条。"))).text();
+        Verdict v2 = parseVerdict(raw);
+        return v2 != null ? v2 : new Verdict(true, List.of());
     }
 
-    /** 最终校验：quiet 客户端对照述求与账本检查草稿，返回 PASS 或缺陷清单。 */
-    private String verify(String goal, String ledger, String draft) {
-        return quietLlm.call(List.of(),
-                List.of(Msg.system(VERIFY_PROMPT),
-                        Msg.user("任务述求：\n" + goal
-                                + "\n\n事实账本：\n" + ledger
-                                + "\n\n草稿回答：\n" + draft))).text();
+    /** 组装校验对照内容：述求 + 计划 + 账本 + 草稿。 */
+    private static String buildVerifyQuery(String goal, String plan, String ledger, String draft) {
+        StringBuilder q = new StringBuilder("任务述求：\n").append(goal);
+        if (plan != null && !plan.isBlank()) {
+            q.append("\n\n计划与进度：\n").append(plan);
+        }
+        if (ledger != null && !ledger.isBlank()) {
+            q.append("\n\n事实账本：\n").append(ledger);
+        }
+        q.append("\n\n草稿回答：\n").append(draft);
+        return q.toString();
+    }
+
+    /** 解析校验器 JSON：取首个 { 到末个 } 片段；FAIL 但无缺陷视为无法判定（返回 null，交由调用方放行）。 */
+    private static Verdict parseVerdict(String text) {
+        if (text == null) {
+            return null;
+        }
+        int s = text.indexOf('{');
+        int e = text.lastIndexOf('}');
+        if (s < 0 || e <= s) {
+            return null;
+        }
+        JsonNode root;
+        try {
+            root = JSON.readTree(text.substring(s, e + 1));
+        } catch (Exception ex) {
+            return null;
+        }
+        String verdict = root.path("verdict").asText("").strip();
+        boolean pass = "PASS".equalsIgnoreCase(verdict);
+        if (!pass && !"FAIL".equalsIgnoreCase(verdict)) {
+            return null;
+        }
+        if (pass) {
+            return new Verdict(true, List.of());
+        }
+        List<String> defects = new ArrayList<>();
+        JsonNode arr = root.path("defects");
+        if (arr.isArray()) {
+            for (JsonNode n : arr) {
+                String d = n.asText("").strip();
+                if (!d.isEmpty()) {
+                    defects.add(d);
+                }
+            }
+        }
+        return defects.isEmpty() ? null : new Verdict(false, defects);
     }
 
     /** 控制台预览工具结果前 200 字符。 */

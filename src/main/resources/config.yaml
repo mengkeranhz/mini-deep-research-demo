@@ -3,7 +3,7 @@ llm:
   base-url: https://open.bigmodel.cn/api/anthropic
   model: glm-5.3
   api-key: "${LLM_API_KEY}"
-  max-tokens: 8192
+  max-tokens: 32768
   temperature: 0
   streaming: true
 
