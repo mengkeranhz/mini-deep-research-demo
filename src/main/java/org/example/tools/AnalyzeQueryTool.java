@@ -62,7 +62,8 @@ public class AnalyzeQueryTool implements AgentTool {
     @Override
     public ToolDef definition() {
         return new ToolDef(name(), "分析用户述求：识别硬约束与信息缺口，给出总体计划并拆解为带依赖的任务清单（JSON）。"
-                        + "required_facts 每项会被分配稳定 id（rf1、rf2…），record_facts 用 target 引用。"
+                        + "required_facts 每项会被分配稳定 id（rf1、rf2…），record_facts 用 target 引用；"
+                        + "重规划时只声明新增的覆盖目标，已有目标不要重复声明。"
                         + "初始规划或执行中发现新信息、需要新任务时随时可调用；重规划会基于当前进度、复用已完成结论。"
                         + "生成的任务状态每轮以系统快照自动注入。",
                 Map.of("type", "object",
@@ -85,6 +86,14 @@ public class AnalyzeQueryTool implements AgentTool {
             planMsgs.add(Msg.system("当前进度（供重规划参考，尽量复用已完成结论，只补齐缺口）：\n" + snapshot
                 + "\n规则：已完成任务若需保留在 tasks 中，content 必须与上版逐字一致（系统据此继承「完成」状态，"
                 + "不要改写或同义替换）；也可以直接省略已完成任务，只列待办与新任务。"));
+        }
+        // 重规划同样只声明增量覆盖目标：注入已声明清单，防止全量重复申报使目标无限膨胀、覆盖缺口永不收敛
+        String declared = facts.declaredTargets();
+        if (declared != null) {
+            planMsgs.add(Msg.system("已声明的数据覆盖目标（required_facts，已保存在事实账本）：\n" + declared
+                + "\n规则：required_facts 只声明增量——新增维度，或已有维度补充的新时期"
+                + "（dimension 必须与上表逐字一致才会并入同一目标，不要改写或同义替换）；"
+                + "上表已有的维度与时期一律不要重复声明。"));
         }
         planMsgs.add(Msg.user(query));
         String raw = LlmClient.create(quiet).call(List.of(), planMsgs).text();
@@ -119,15 +128,21 @@ public class AnalyzeQueryTool implements AgentTool {
         tasks.reset(new TaskStore.Header(root.path("plan").asText(""),
                 strList(root.path("constraints")), strList(root.path("unknowns"))), parsed);
 
-        // 覆盖目标写入事实账本（追加合并，重规划只补不丢），作为最终答案的覆盖度检查表；每项分配稳定 id
+        // 覆盖目标写入事实账本（追加合并，重规划只补不丢），作为最终答案的覆盖度检查表；每项分配稳定 id。
+        // 只回显增量：目标已存在且无新时期（或维度为空）的声明直接忽略——重规划全量重复申报时账本与
+        // 返回值都不膨胀，覆盖缺口才可能收敛归零，避免「每次重规划都长出新目标」的死循环
         ArrayNode rfs = M.createArrayNode();
         for (JsonNode rf : root.path("required_facts")) {
-            String id = facts.require(rf.path("dimension").asText(null), strList(rf.path("periods")));
-            if (id != null) {
-                ObjectNode o = rfs.addObject();
-                o.put("id", id);
-                o.put("dimension", rf.path("dimension").asText(null));
-                o.set("periods", rf.path("periods"));
+            FactsStore.Requirement r = facts.require(rf.path("dimension").asText(null), strList(rf.path("periods")));
+            if (r == null || (!r.newTarget() && r.addedPeriods().isEmpty())) {
+                continue;
+            }
+            ObjectNode o = rfs.addObject();
+            o.put("id", r.id());
+            o.put("dimension", rf.path("dimension").asText(null));
+            o.set("periods", M.valueToTree(r.addedPeriods()));
+            if (!r.newTarget()) {
+                o.put("appended", true); // 并入已有目标：periods 仅为本次新增的时期
             }
         }
 
@@ -147,7 +162,8 @@ public class AnalyzeQueryTool implements AgentTool {
             o.put("status", t.status());
         }
         return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
-                + "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
+                + "\n任务清单已保存；required_facts 仅含本次新增的覆盖目标（无新增时不列出，已有目标在事实账本中保持不变）。"
+                + "请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
                 + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径，target 填对应 required_facts 的 id），"
                 + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。";
     }

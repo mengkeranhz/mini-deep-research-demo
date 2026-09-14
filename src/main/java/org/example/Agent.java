@@ -14,10 +14,6 @@ public class Agent {
     static final int MAX_ROUNDS = 120;
     /** 上一次响应 inputTokens 超过该值即触发上下文压缩（演示时可调小）。 */
     static final int CONTEXT_TOKEN_THRESHOLD = 60_000;
-    /** 最终校验未通过时最多触发的重规划次数（防死循环）。 */
-    static final int MAX_REPLANS = 3;
-    /** 最终校验判定为纯表述问题时，最多直接修订的次数（防死循环）。 */
-    static final int MAX_REVISES = 3;
     /** 对话稿中每条工具结果正文的最大保留长度（足够保住数值与链接，又不让稿子膨胀）。 */
     static final int TRANSCRIPT_TOOL_BODY_LIMIT = 1_500;
 
@@ -57,8 +53,6 @@ public class Agent {
         messages.add(Msg.user(request));
         // 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）
         StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
-        int replans = 0; // 最终校验判定为信息缺口时触发的重规划次数
-        int revises = 0; // 最终校验判定为纯表述问题时触发的直接修订次数
         String bestAnswer = null; // 当前最完整的交付草稿：校验/压缩围绕它，最终返回的是完整答案而非补丁
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
@@ -125,49 +119,37 @@ public class Agent {
                         String gaps = facts.gateReport();
                         if (gaps != null) {
                             System.out.println("\n[覆盖度闸门] 未通过：\n" + gaps);
-                            if (replans < MAX_REPLANS) {
-                                messages.add(Msg.assistant(resp.blocks()));
-                                messages.add(Msg.user("最终回答前检查发现以下数据覆盖缺口：\n" + gaps
-                                        + "\n\n请逐项处理后再【重新输出完整的最终回答】：\n"
-                                        + "1. 继续检索（换关键词、换统计口径、换来源）并用 record_facts 入账（target 填缺口对应的 required_facts id，如 rf1）；\n"
-                                        + "2. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
-                                        + "3. 确认检索不到的，用 record_facts 声明 status=not_found，"
-                                        + "note 写明已尝试的检索关键词与来源，并在最终答案中如实说明该缺口。"));
-                                transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
-                                replans++;
-                                continue;
-                            }
-                            // 覆盖缺口追问次数用尽：放行当前最佳答案，避免无界循环
+                            messages.add(Msg.assistant(resp.blocks()));
+                            messages.add(Msg.user("最终回答前检查发现以下数据覆盖缺口：\n" + gaps
+                                    + "\n\n请逐项处理后再【重新输出完整的最终回答】：\n"
+                                    + "1. 继续检索（换关键词、换统计口径、换来源）并用 record_facts 入账（target 填缺口对应的 required_facts id，如 rf1）；\n"
+                                    + "2. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
+                                    + "3. 确认检索不到的，用 record_facts 声明 status=not_found，"
+                                    + "note 写明已尝试的检索关键词与来源，并在最终答案中如实说明该缺口。"));
+                            transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
+                            continue;
                         } else {
                             System.out.println("[覆盖度闸门] 通过");
                         }
                     } else if (head.startsWith("REVISE")) {
                         // 纯表述问题：直接修订，不调用 analyze_query、不重置任务
-                        if (revises < MAX_REVISES) {
-                            System.out.println("\n[最终校验] 表述问题，直接修订（不触发重规划）：\n" + verdict);
-                            messages.add(Msg.assistant(resp.blocks()));
-                            messages.add(Msg.user("你的回答存在以下表述问题，无需重新检索或重新规划，请直接修订后【重新输出完整的最终回答】：\n"
-                                    + verdict));
-                            transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
-                            revises++;
-                            continue;
-                        }
-                        // 修订次数用尽：放行当前最佳答案
+                        System.out.println("\n[最终校验] 表述问题，直接修订（不触发重规划）：\n" + verdict);
+                        messages.add(Msg.assistant(resp.blocks()));
+                        messages.add(Msg.user("你的回答存在以下表述问题，无需重新检索或重新规划，请直接修订后【重新输出完整的最终回答】：\n"
+                                + verdict));
+                        transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
+                        continue;
                     } else {
                         // RETRIEVE 或无法识别 → 保守按信息缺口走重规划
-                        if (replans < MAX_REPLANS) {
-                            System.out.println("\n[最终校验] 信息缺口，触发重规划：\n" + verdict);
-                            messages.add(Msg.assistant(resp.blocks()));
-                            messages.add(Msg.user("你的回答未通过最终校验，存在以下信息缺口：\n" + verdict
-                                    + "\n\n请先调用 analyze_query 重新规划（新增的检索目标写入 required_facts），"
-                                    + "补齐缺陷后【重新输出完整的最终回答】——不要只输出补丁或缺失部分，"
-                                    + "必须覆盖问题要求的全部维度与时期；新检索到的数据先 record_facts 入账再作答，"
-                                    + "答案数据一律以事实账本为准。"));
-                            transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
-                            replans++;
-                            continue;
-                        }
-                        // 重规划次数用尽：放行当前最佳答案
+                        System.out.println("\n[最终校验] 信息缺口，触发重规划：\n" + verdict);
+                        messages.add(Msg.assistant(resp.blocks()));
+                        messages.add(Msg.user("你的回答未通过最终校验，存在以下信息缺口：\n" + verdict
+                                + "\n\n请先调用 analyze_query 重新规划（新增的检索目标写入 required_facts），"
+                                + "补齐缺陷后【重新输出完整的最终回答】——不要只输出补丁或缺失部分，"
+                                + "必须覆盖问题要求的全部维度与时期；新检索到的数据先 record_facts 入账再作答，"
+                                + "答案数据一律以事实账本为准。"));
+                        transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
+                        continue;
                     }
                 }
                 return candidate; // 无工具调用 → 结束返回结论

@@ -19,6 +19,9 @@ public class FactsStore {
     /** 覆盖目标：id 稳定（rf1、rf2…），dimension 仅作展示标签，periods 可随重规划追加。 */
     public record Target(String id, String dimension, List<String> periods) {}
 
+    /** 声明结果：id 为该维度稳定 id；newTarget 表示本次是否新建目标；addedPeriods 为本次新增的时期。 */
+    public record Requirement(String id, boolean newTarget, List<String> addedPeriods) {}
+
     /** 单条事实：status 为 found（官方/已核验）、proxy（代理指标或第三方折算）、not_found（检索未得的缺口声明）；
      *  target 指向覆盖目标 id（可空，空则退回维度规范化匹配）。 */
     public record Fact(String dimension, String period, String metric, String value,
@@ -30,23 +33,28 @@ public class FactsStore {
     private final Map<String, Fact> facts = new LinkedHashMap<>();
     private int nextTargetId = 1;
 
-    /** 声明（或追加）某维度需覆盖的时期；返回该维度的稳定 id（rfN）。空白与重复时期忽略。 */
-    public String require(String dimension, List<String> periods) {
+    /** 声明（或追加）某维度需覆盖的时期；返回稳定 id 与本次增量（新建目标/新增时期），
+     *  供调用方在重规划时只回显增量目标，防止全量重复申报导致覆盖目标无限膨胀。空白与重复时期忽略。 */
+    public Requirement require(String dimension, List<String> periods) {
         if (dimension == null || dimension.isBlank()) {
             return null;
         }
         String d = dimension.strip();
         Target t = targets.get(d);
-        if (t == null) {
+        boolean newTarget = t == null;
+        if (newTarget) {
             t = new Target("rf" + nextTargetId++, d, new ArrayList<>());
             targets.put(d, t);
         }
+        List<String> added = new ArrayList<>();
         for (String p : periods) {
-            if (p != null && !p.isBlank() && !t.periods().contains(p.strip())) {
-                t.periods().add(p.strip());
+            String ps = p == null ? null : p.strip();
+            if (ps != null && !ps.isBlank() && !t.periods().contains(ps)) {
+                t.periods().add(ps);
+                added.add(ps);
             }
         }
-        return t.id();
+        return new Requirement(t.id(), newTarget, added);
     }
 
     /** 入账一条事实（同 key 覆盖），返回是否新增或更新了内容。target 指向未知 id 时退回维度兜底。 */
@@ -97,6 +105,16 @@ public class FactsStore {
         return sb.toString();
     }
 
+    /** 已声明覆盖目标清单（id + 维度 + 时期）。重规划时注入分析提示词，便于只声明增量目标。 */
+    public String declaredTargets() {
+        if (targets.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        appendTargets(sb);
+        return sb.toString();
+    }
+
     /** 完整账本文本：覆盖目标（含 id）+ 全部事实明细。用于最终校验对照与上下文压缩重建。 */
     public String ledger() {
         if (isEmpty()) {
@@ -105,10 +123,7 @@ public class FactsStore {
         StringBuilder sb = new StringBuilder("# 事实账本（record_facts 累积的结构化数据）\n");
         if (!targets.isEmpty()) {
             sb.append("## 覆盖目标（record_facts 用 target 填下列 id 完成覆盖匹配）\n");
-            for (Target t : targets.values()) {
-                sb.append("- [").append(t.id()).append("] ").append(t.dimension())
-                        .append(": ").append(String.join("、", t.periods())).append('\n');
-            }
+            appendTargets(sb);
         }
         sb.append("## 已入账事实（").append(counts()).append("）\n");
         int i = 1;
@@ -160,6 +175,14 @@ public class FactsStore {
         List<String> missing = missingPeriods();
         return "覆盖 " + (total - missing.size()) + "/" + total + " 个目标时期"
                 + (missing.isEmpty() ? "" : "；缺口: " + String.join("、", missing));
+    }
+
+    /** 覆盖目标行（- [id] 维度: 时期），declaredTargets 与 ledger 共用。 */
+    private void appendTargets(StringBuilder sb) {
+        for (Target t : targets.values()) {
+            sb.append("- [").append(t.id()).append("] ").append(t.dimension())
+                    .append(": ").append(String.join("、", t.periods())).append('\n');
+        }
     }
 
     /** 覆盖目标中尚无任何事实入账的「id@时期（维度）」列表。 */
