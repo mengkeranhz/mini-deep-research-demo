@@ -19,6 +19,8 @@ abstract class AgentLoop<T> {
     private static final int CONTEXT_TOKEN_THRESHOLD = 60_000;
     /** 对话稿中每条工具结果正文的最大保留长度（足够保住数值与链接，又不让稿子膨胀）。 */
     private static final int TRANSCRIPT_TOOL_BODY_LIMIT = 1_500;
+    /** 控制台打印工具结果正文的最大长度：保留结构化换行，仅对超长输出截断并标注总长。 */
+    private static final int CONSOLE_TOOL_BODY_LIMIT = 12_000;
 
     protected final LlmClient llm;
     protected final ToolRegistry registry;
@@ -167,10 +169,7 @@ abstract class AgentLoop<T> {
             String finalAnswer = null;
             for (Block.ToolUse call : toolCalls) {
                 ToolRegistry.ToolOutput out = registry.run(call);
-                // analyze_query 的规划 JSON 完整可见；其余按预览截断
-                boolean full = "analyze_query".equals(call.name());
-                String printed = full ? out.content() : preview(out.content());
-                System.out.println("[" + tag() + "工具结果] " + printed);
+                System.out.println("[" + tag() + "工具结果]\n" + preview(out.content()));
                 messages.add(Msg.tool(new Block.ToolResult(call.id(), out.content(), out.isError())));
                 transcript.append("  [").append(call.name()).append(" 结果] ")
                         .append(body(out.content())).append('\n');
@@ -249,10 +248,12 @@ abstract class AgentLoop<T> {
         }
     }
 
-    /** 控制台预览工具结果前 200 字符。 */
+    /** 控制台打印工具结果正文：保留换行与结构，仅对超长输出截断并标注总长。 */
     private static String preview(String content) {
-        String oneLine = content.replaceAll("\\s+", " ");
-        return oneLine.length() <= 200 ? oneLine : oneLine.substring(0, 200) + "…";
+        String s = content.strip();
+        return s.length() <= CONSOLE_TOOL_BODY_LIMIT ? s
+                : s.substring(0, CONSOLE_TOOL_BODY_LIMIT)
+                + "\n…（工具结果共 " + s.length() + " 字符，已截断）";
     }
 
     /** 对话稿中的工具结果正文：保住数值与来源链接所需的长度，超出截断。 */

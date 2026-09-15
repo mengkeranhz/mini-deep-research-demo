@@ -3,9 +3,12 @@ llm:
   base-url: https://open.bigmodel.cn/api/anthropic
   model: glm-5.3
   api-key: "${LLM_API_KEY}"
-  max-tokens: 32768
+  max-tokens: 16384
   temperature: 0
   streaming: true
+  # Anthropic 协议扩展思考预算（token 数）；>0 时请求带 thinking 块，须 < max-tokens。
+  # 若网关/模型不支持扩展思考返回 400，改回 0 即可关闭。
+  thinking-budget-tokens: 16384
 
 storage:
   # 文件保存/读取的根目录。留空时自动回退：工作目录(user.dir) → 项目目录。

@@ -4,7 +4,7 @@ package org.example;
  * 子 Agent：每次 execute_task 新建实例、全新上下文，独立完成一个自包含任务。
  * 终止协议与父 Agent 对齐：调用终止工具 final_answer 提交最终答案，或某轮纯文本视为隐式提交，
  * 二者都经 LLM 终止校验，未通过则反馈缺陷继续修正（连续 3 次未通过 best-effort 返回部分结果）；
- * 子代理同样可调用 analyze_query 自主规划（独立 TaskStore，不与父共享）。
+ * 子代理只执行不规划（无 analyze_query / update_task / execute_task 工具，独立 TaskStore 始终为空，不与父共享）。
  * 看不到父对话与计划清单（仅凭简报锚定原始述求），与父共享同一事实账本实例。
  * 轮次耗尽软着陆：不抛异常，返回部分结果，由父层决定重派或收尾。
  * 轮转 / 压缩 / 校验循环骨架复用 {@link AgentLoop}。

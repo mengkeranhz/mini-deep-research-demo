@@ -26,7 +26,7 @@ public class ExecuteTaskTool implements AgentTool {
     public static final String NAME = "execute_task";
 
     /** 回传父上下文的结果上限：保住数据与链接，又不让父上下文膨胀。 */
-    private static final int RESULT_LIMIT = 10_000;
+    private static final int RESULT_LIMIT = 24_000;
     /** 任务完成备注的缩写上限。 */
     private static final int NOTE_LIMIT = 200;
 
@@ -97,7 +97,7 @@ public class ExecuteTaskTool implements AgentTool {
                 : "（子代理未在轮次上限内完成，以下为部分结果，任务保持进行中）\n" + body;
     }
 
-    /** 每次调用新建独立子代理与独立 TaskStore（子代理可自主 analyze_query 规划，不与父共享）；
+    /** 每次调用新建独立子代理与独立 TaskStore（子代理只执行不规划，不与父共享）；
      *  LLM 客户端（流式 + 校验用非流式）懒加载一次复用，Amap 节流全局唯一。 */
     private SubAgent subAgent() {
         if (subLlm == null) {
@@ -105,9 +105,11 @@ public class ExecuteTaskTool implements AgentTool {
             subQuietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
                     cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false, 0));
         }
-        // 子代理能力与父对齐：开放 analyze_query / update_task / final_answer，仅排除 execute_task 防嵌套展开
+        // 子代理只做执行：排除 execute_task 防嵌套展开，排除 analyze_query / update_task 禁止任务规划，
+        // 仅保留检索/取数/计算/入账/final_answer
         TaskStore subTasks = new TaskStore();
-        ToolRegistry subRegistry = new ToolRegistry(cfg, subTasks, facts, amap, Set.of("execute_task"));
+        ToolRegistry subRegistry = new ToolRegistry(cfg, subTasks, facts, amap,
+                Set.of("execute_task", "analyze_query", "update_task"));
         return new SubAgent(subLlm, subQuietLlm, subRegistry, facts, subTasks, cfg.llm().streaming());
     }
 
