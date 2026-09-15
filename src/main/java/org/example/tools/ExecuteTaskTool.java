@@ -17,8 +17,8 @@ import java.util.Set;
 
 /**
  * execute_task：把一个自包含任务派发给新建的子 Agent Loop 执行（每次全新上下文）。
- * 子代理只能看到原始述求、本任务文本与事实账本（同一 FactsStore 实例，父子共享），
- * 看不到父对话与计划清单；子代理与父对齐——调用 final_answer 提交结果并做 LLM 终止校验。
+ * 子代理只能看到本任务文本与事实账本（同一 FactsStore 实例，父子共享），
+ * 看不到原始述求、父对话与计划清单；子代理与父对齐——调用 final_answer 提交结果并做 LLM 终止校验。
  */
 public class ExecuteTaskTool implements AgentTool {
 
@@ -54,7 +54,7 @@ public class ExecuteTaskTool implements AgentTool {
     @Override
     public ToolDef definition() {
         return new ToolDef(name(), "把一个任务派发给独立子代理执行（检索、取数、计算、入账均由子代理完成）。"
-                        + "子代理看不到计划与任务清单，task 必须自包含：写明背景、范围、时期、口径、单位与期望产出；"
+                        + "子代理看不到原始述求、计划与任务清单，task 必须自包含：写明背景、范围、时期、口径、单位与期望产出；"
                         + "带 task_id 时状态自动维护（进行中/完成）。",
                 Map.of("type", "object",
                         "properties", Map.of(
@@ -113,18 +113,11 @@ public class ExecuteTaskTool implements AgentTool {
         return new SubAgent(subLlm, subQuietLlm, subRegistry, facts, subTasks, cfg.llm().streaming());
     }
 
-    /** 组装子代理简报：只共享事实账本，不共享计划——子代理以原始述求 + 自包含任务文本锚定工作，
+    /** 组装子代理简报：只共享事实账本，不共享原始述求与计划——子代理以自包含任务文本锚定工作，
      *  不给看父草稿与任务清单。 */
     private String buildBrief(String task, String context) {
         StringBuilder brief = new StringBuilder();
-        String original = tasks != null ? tasks.original() : null;
-        if (original == null || original.isBlank()) {
-            original = tasks != null ? tasks.goal() : null; // 未走 Agent.run 的兜底
-        }
-        if (original != null && !original.isBlank()) {
-            brief.append("原始述求：\n").append(original).append("\n\n");
-        }
-        brief.append("本次任务（自包含，请独立完成）：\n").append(task);
+        brief.append("本次任务（自包含，你看不到原始述求与计划清单，请独立完成）：\n").append(task);
         if (context != null && !context.isBlank()) {
             brief.append("\n\n补充提示：\n").append(context);
         }

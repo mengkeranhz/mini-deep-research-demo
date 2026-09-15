@@ -44,7 +44,7 @@ public class Agent extends AgentLoop<String> {
 
     /** 入口：原始述求常驻（重规划不清），随后进入共享循环。 */
     public String run(String request) {
-        tasks.original(request); // 子代理简报锚点：无论是否规划，原始述求常驻
+        tasks.original(request); // 最终校验审计基线调整用：无论是否规划，原始述求常驻
         return runLoop(request);
     }
 

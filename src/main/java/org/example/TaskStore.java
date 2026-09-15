@@ -19,7 +19,7 @@ public class TaskStore {
     private List<String> constraints = List.of();
     private List<String> unknowns = List.of();
     private List<String> coreNeeds = List.of();
-    private String originalRequest; // Agent.run 开始写入：原始述求，子代理简报锚点；reset 不清（重规划保留）
+    private String originalRequest; // Agent.run 开始写入：原始述求，最终校验审计基线调整用；reset 不清（重规划保留）
     private String draft;           // 最近一次校验未通过的草稿答案；上下文压缩重建时显式携带
     private final List<Task> tasks = new ArrayList<>();
 
