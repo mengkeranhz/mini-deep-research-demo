@@ -2,6 +2,7 @@ package org.example;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.example.tools.AmapClient;
+import org.example.tools.ExecuteTaskTool;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
@@ -12,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,23 +43,37 @@ public class ToolRegistry {
     /** 工具执行结果；isError=true 时以 is_error 的 tool_result 返回给 LLM（最小容错）。 */
     public record ToolOutput(String content, boolean isError) {}
 
-    private final Map<String, AgentTool> tools = new LinkedHashMap<>();
+    /** 编排模式（主+子）下父代理不直接持有的工具：检索/取数/入账全部下沉子代理。 */
+    private static final Set<String> ORCHESTRATOR_EXCLUDES = Set.of(
+            "web_search", "locate_sources", "fetch_url", "read_file",
+            "search_place", "search_nearby", "route_query", "record_facts");
 
-    /** 注册时新建 AmapClient（QPS 节流随本实例生效）；excludeNames 中的工具不注册。 */
-    public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, Set<String> excludeNames) {
+    private final Map<String, AgentTool> tools = new LinkedHashMap<>();
+    /** 构造时给定的一直排除项（子代理用：execute_task 防嵌套）。 */
+    private final Set<String> excluded = new HashSet<>();
+    /** 可空：父代理据此在编排/单代理两套工具集间动态切换。 */
+    private final ModeControl mode;
+
+    /** 父代理用：自带 AmapClient + 模式控制，初始按编排模式裁剪工具集。 */
+    public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, ModeControl mode) {
         this(cfg, tasks, facts, new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs()),
-                excludeNames);
+                mode, Set.of());
     }
 
-    /** 复用传入 AmapClient 注册（父子注册表共用一个实例 → QPS 节流全局唯一）。
-     *  过滤在实例化之后——被排除的工具构造器只赋字段不执行，tasks=null 也安全。 */
+    /** 子代理用：复用传入 AmapClient（父子共享 QPS 节流），无模式控制，excludeNames 恒定排除。 */
     public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, AmapClient amap,
                         Set<String> excludeNames) {
+        this(cfg, tasks, facts, amap, null, excludeNames);
+    }
+
+    private ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, AmapClient amap,
+                         ModeControl mode, Set<String> excludeNames) {
+        this.mode = mode;
+        this.excluded.addAll(excludeNames);
         scanPackage(TOOL_PACKAGE).stream()
                 .filter(ToolRegistry::isToolClass)
                 .sorted(Comparator.comparing(Class::getSimpleName)) // 按类名稳定排序
-                .map(c -> instantiate(c, cfg, amap, tasks, facts))
-                .filter(t -> !excludeNames.contains(t.name()))
+                .map(c -> instantiate(c, cfg, amap, tasks, facts, mode))
                 .forEach(this::register);
     }
 
@@ -65,19 +81,34 @@ public class ToolRegistry {
         tools.put(tool.name(), tool);
     }
 
+    /** 对当前调用方可见的工具：恒定排除项之外，父代理按当前模式裁剪。 */
+    private boolean active(AgentTool tool) {
+        String name = tool.name();
+        if (excluded.contains(name)) {
+            return false;
+        }
+        if (mode != null) {
+            return ModeControl.SINGLE.equals(mode.get())
+                    ? !ExecuteTaskTool.NAME.equals(name)
+                    : !ORCHESTRATOR_EXCLUDES.contains(name);
+        }
+        return true;
+    }
+
     public List<ToolDef> definitions() {
-        return tools.values().stream().map(AgentTool::definition).toList();
+        return tools.values().stream().filter(this::active).map(AgentTool::definition).toList();
     }
 
-    /** 按名称取工具（供 Agent 程序化强制调用，如校验失败后的确定性重规划）；未注册返回 null。 */
+    /** 按名称取工具（供 Agent 程序化强制调用，如校验失败后的确定性重规划）；不可见返回 null。 */
     public AgentTool tool(String name) {
-        return tools.get(name);
+        AgentTool tool = tools.get(name);
+        return tool != null && active(tool) ? tool : null;
     }
 
-    /** 分发执行；未知工具与执行异常都转成 is_error 结果返回。 */
+    /** 分发执行；未知/不可见工具与执行异常都转成 is_error 结果返回。 */
     public ToolOutput run(Block.ToolUse call) {
         AgentTool tool = tools.get(call.name());
-        if (tool == null) {
+        if (tool == null || !active(tool)) {
             return new ToolOutput("未知工具: " + call.name(), true);
         }
         try {
@@ -134,9 +165,9 @@ public class ToolRegistry {
                 && !Modifier.isAbstract(clazz.getModifiers());
     }
 
-    /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / TaskStore / FactsStore / Config 各段），无参构造直接实例化。 */
+    /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / TaskStore / FactsStore / ModeControl / Config 各段），无参构造直接实例化。 */
     private static AgentTool instantiate(Class<?> clazz, Config.Data cfg, AmapClient amap, TaskStore tasks,
-                                         FactsStore facts) {
+                                         FactsStore facts, ModeControl mode) {
         for (Constructor<?> ctor : clazz.getDeclaredConstructors()) {
             Class<?>[] types = ctor.getParameterTypes();
             Object[] args = new Object[types.length];
@@ -145,6 +176,7 @@ public class ToolRegistry {
                 if (types[i] == AmapClient.class) args[i] = amap;
                 else if (types[i] == TaskStore.class) args[i] = tasks;
                 else if (types[i] == FactsStore.class) args[i] = facts;
+                else if (types[i] == ModeControl.class) args[i] = mode;
                 else if (types[i] == Config.Llm.class) args[i] = cfg.llm();
                 else if (types[i] == Config.WebSearch.class) args[i] = cfg.webSearch();
                 else if (types[i] == Config.Lbs.class) args[i] = cfg.lbs();
@@ -165,7 +197,7 @@ public class ToolRegistry {
             }
         }
         throw new IllegalStateException("无法实例化工具 " + clazz.getName()
-                + "：构造参数需为无参或 AmapClient / TaskStore / FactsStore / Config 各段");
+                + "：构造参数需为无参或 AmapClient / TaskStore / FactsStore / ModeControl / Config 各段");
     }
 
     private static Class<?> loadClass(String name) {

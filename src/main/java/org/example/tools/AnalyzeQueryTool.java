@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.example.Config;
+import org.example.Console;
 import org.example.FactsStore;
 import org.example.LlmClient;
+import org.example.ModeControl;
 import org.example.Msg;
 import org.example.TaskStore;
 import org.example.ToolDef;
@@ -34,20 +36,27 @@ public class AnalyzeQueryTool implements AgentTool {
             - constraints: 硬约束数组（时间、范围、口径、方式等明确限制），无则空数组
             - unknowns: 未知/待定点数组（用户未说清、需澄清或需做假设之处），无则空数组
             - core_needs: 核心述求数组（用户最核心要回答的几个问题/要点，每条一句短语），无则空数组
+            - mode: "orchestrator" 或 "single"，判定述求适合哪种执行模式。
+              "orchestrator"（主+子代理）：述求可拆解为多路相互独立的深度检索/取数（多主题、多数据点、多子问题），检索取数下沉子代理；
+              "single"（单代理）：单一、连贯、强耦合的任务（如路线/行程规划、单跳问答、需全程一个上下文连续推理），父代理亲自检索取数、不派发子任务。
             - tasks: 3-6 个可执行任务，每项为一个任务描述字符串。
               任务按数据获取方式组织：检索能解决的写检索任务，检索拿不到的写工程任务（run_code），不要都规划成换关键词的搜索。
-              每个任务将由独立子代理执行——子代理只能看到原始述求与该任务文本，任务描述必须自包含：写明背景、范围、时期、口径、单位与期望产出。
+              mode=orchestrator 时每个任务由独立子代理执行——子代理只能看到原始述求与该任务文本，任务描述必须自包含：写明背景、范围、时期、口径、单位与期望产出；
+              mode=single 时任务由父代理亲自执行。
             若提供了当前进度或事实账本：结合已知信息规划，只补剩余工作；目标需要调整时按调整后的目标给出。
             """;
 
     private final Config.Llm llmCfg;
     private final TaskStore tasks;
     private final FactsStore facts;
+    /** 可空：父代理据此切换执行模式（子代理无模式控制）。 */
+    private final ModeControl mode;
 
-    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks, FactsStore facts) {
+    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks, FactsStore facts, ModeControl mode) {
         this.llmCfg = llmCfg;
         this.tasks = tasks;
         this.facts = facts;
+        this.mode = mode;
     }
 
     @Override
@@ -103,9 +112,21 @@ public class AnalyzeQueryTool implements AgentTool {
         List<String> coreNeeds = strList(root.path("core_needs"));
         tasks.reset(query, root.path("plan").asText(""), constraints, unknowns, coreNeeds, parsed);
 
+        // 判定执行模式（首判锁定）：父代理据此切换工具集，子代理无模式控制
+        String decided = ModeControl.ORCHESTRATOR;
+        if (mode != null) {
+            mode.set(root.path("mode").asText("").strip());
+            decided = mode.get();
+            System.out.println(Console.header("[执行模式] ") + decided
+                    + (ModeControl.SINGLE.equals(decided)
+                        ? "（单代理：禁用 execute_task，父代理亲自检索取数）"
+                        : "（主+子：检索取数下沉子代理）"));
+        }
+
         // 归一化后的 JSON 回给模型（含任务 id 与继承后的真实状态——重声明原文的任务已是 done）
         ObjectNode out = M.createObjectNode();
         out.put("plan", root.path("plan").asText(""));
+        out.put("mode", decided);
         out.set("constraints", M.valueToTree(constraints));
         out.set("unknowns", M.valueToTree(unknowns));
         out.set("core_needs", M.valueToTree(coreNeeds));
@@ -115,7 +136,9 @@ public class AnalyzeQueryTool implements AgentTool {
             o.put("id", t.id()).put("content", t.content()).put("status", t.status());
         }
         return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
-                + "\n任务清单已保存。请按顺序用 execute_task 执行待办任务。";
+                + (ModeControl.SINGLE.equals(decided)
+                    ? "\n任务清单已保存。本述求判定为单代理模式，请亲自执行待办任务（execute_task 已禁用）。"
+                    : "\n任务清单已保存。请按顺序用 execute_task 执行待办任务。");
     }
 
     /** 字符串数组读取：非数组返回空列表，元素去空白、去空项。 */

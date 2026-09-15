@@ -22,6 +22,9 @@ import java.util.Set;
  */
 public class ExecuteTaskTool implements AgentTool {
 
+    /** 工具名（父代理单代理模式下据此禁用）。 */
+    public static final String NAME = "execute_task";
+
     /** 回传父上下文的结果上限：保住数据与链接，又不让父上下文膨胀。 */
     private static final int RESULT_LIMIT = 10_000;
     /** 任务完成备注的缩写上限。 */
@@ -45,7 +48,7 @@ public class ExecuteTaskTool implements AgentTool {
 
     @Override
     public String name() {
-        return "execute_task";
+        return NAME;
     }
 
     @Override

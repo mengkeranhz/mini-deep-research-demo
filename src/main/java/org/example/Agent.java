@@ -2,8 +2,6 @@ package org.example;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.util.Set;
-
 /**
  * 父 Agent（编排器）：规划（analyze_query）→ 派发（execute_task，每次新建子代理执行）→
  * 综合事实账本与子代理结果，调用终止工具 final_answer 提交最终答案。
@@ -37,11 +35,9 @@ public class Agent extends AgentLoop<String> {
                     cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
             TaskStore tasks = new TaskStore();
             FactsStore facts = new FactsStore();
-            // 纯编排器：检索/取数/入账全部下沉子代理；保留 run_code 与 current_time 供综合期计算与日期核对；
-            // 终止工具 final_answer 不在排除之列
-            ToolRegistry registry = new ToolRegistry(cfg, tasks, facts, Set.of(
-                    "web_search", "locate_sources", "fetch_url", "read_file", "search_place", "search_nearby",
-                    "route_query", "record_facts"));
+            // 工具集由首轮 analyze_query 判定的执行模式决定：编排模式=纯编排器，单代理模式=全量工具
+            ModeControl mode = new ModeControl();
+            ToolRegistry registry = new ToolRegistry(cfg, tasks, facts, mode);
             return new Deps(llm, quietLlm, registry, facts, tasks, cfg.llm().streaming());
         }
     }
