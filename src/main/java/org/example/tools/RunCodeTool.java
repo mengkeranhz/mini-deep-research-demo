@@ -27,7 +27,7 @@ public class RunCodeTool implements AgentTool {
     @Override
     public ToolDef definition() {
         return new ToolDef(name(), "在本地执行一段 Python 3 脚本（60 秒超时），返回合并的 stdout+stderr。"
-                        + "用于计算、数据处理等。",
+                        + "用于计算、数据处理等；脚本可访问网络与本地文件（发起 HTTP 请求、下载与解析文件、读写本地已有文件等）。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "script", Map.of("type", "string", "description", "Python 3 脚本全文")),

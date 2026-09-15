@@ -64,7 +64,9 @@ public class FetchUrlTool implements AgentTool {
             // charset 传 null 让 jsoup 按 meta 标签自动探测
             Document doc = Jsoup.parse(new ByteArrayInputStream(resp.body()), null, url);
             Files.writeString(path, toMarkdown(doc));
-            return "已保存 Markdown（" + Files.size(path) + " 字节）到 " + path;
+            String hint = thinBodyHint(doc);
+            return "已保存 Markdown（" + Files.size(path) + " 字节）到 " + path
+                    + (hint.isEmpty() ? "" : "\n" + hint);
         }
         Files.write(path, resp.body());
         return "已保存文件（" + resp.body().length + " 字节，" + resp.contentType() + "）到 " + path;
@@ -93,6 +95,28 @@ public class FetchUrlTool implements AgentTool {
             name += ".md";
         }
         return name;
+    }
+
+    /** 正文段落总字符低于该值视为实质性内容过少，附加能力边界提示。 */
+    private static final int THIN_BODY_CHARS = 200;
+
+    /** 静态抓取正文过少时的诚实提示：只陈述本工具的提取范围与能力边界，不给行动指令。
+     *  段落统计与 toMarkdown 同过滤条件（≥20 字符），保证提示与实际保存内容自洽。 */
+    private static String thinBodyHint(Document doc) {
+        int paras = 0;
+        int chars = 0;
+        for (Element p : doc.select("p")) {
+            String text = p.text().strip();
+            if (text.length() >= 20) { // 与 toMarkdown 的正文过滤一致
+                paras++;
+                chars += text.length();
+            }
+        }
+        if (chars >= THIN_BODY_CHARS) {
+            return "";
+        }
+        return "注意：静态抓取到的正文段落极少（" + paras + " 段共 " + chars
+                + " 字符；本工具只提取标题、段落与链接），页面主要内容可能依赖脚本渲染，本工具拿不到脚本渲染的内容。";
     }
 
     /** HTML → 简易 Markdown：标题 + 正文段落 + 链接列表。 */
