@@ -32,7 +32,7 @@ public class Agent extends AgentLoop<String> {
             LlmClient llm = LlmClient.create(cfg.llm());
             // 校验用 quiet 客户端：无工具、非流式——嵌套调用的增量输出不应打进主循环控制台
             LlmClient quietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
-                    cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
+                    cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false, 0));
             TaskStore tasks = new TaskStore();
             FactsStore facts = new FactsStore();
             // 工具集由首轮 analyze_query 判定的执行模式决定：编排模式=纯编排器，单代理模式=全量工具

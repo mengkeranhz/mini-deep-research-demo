@@ -28,6 +28,9 @@ final class OpenAiClient implements LlmClient {
             .connectTimeout(Duration.ofSeconds(15))
             .build();
 
+    /** 流式打印相位（对齐非流式 [思考]/[输出] 标签，块切换时补标签与换行）：0=无，1=思考，2=文本。 */
+    private static final int PHASE_NONE = 0, PHASE_THINKING = 1, PHASE_TEXT = 2;
+
     private final Config.Llm cfg;
 
     OpenAiClient(Config.Llm cfg) {
@@ -99,6 +102,7 @@ final class OpenAiClient implements LlmClient {
         StringBuilder text = new StringBuilder();
         Map<Integer, ObjectNode> calls = new TreeMap<>(); // tool_calls 分片按 index 累积
         int[] usage = {0, 0};
+        int[] phase = {PHASE_NONE}; // 流式打印相位：块切换时补 [思考]/[输出] 标签与换行
         try (Stream<String> lines = resp.body()) {
             lines.filter(line -> line.startsWith("data:")).forEach(line -> {
                 String payload = line.substring(5).strip();
@@ -114,11 +118,25 @@ final class OpenAiClient implements LlmClient {
                 String think = delta.path("reasoning_content").asText("");
                 if (!think.isEmpty()) {
                     thinking.append(think);
+                    if (phase[0] != PHASE_THINKING) {
+                        if (phase[0] != PHASE_NONE) {
+                            System.out.println();
+                        }
+                        System.out.print(Console.thinking("[思考] "));
+                        phase[0] = PHASE_THINKING;
+                    }
                     System.out.print(Console.thinking(think));
                 }
                 String chunk = delta.path("content").asText("");
                 if (!chunk.isEmpty()) {
                     text.append(chunk);
+                    if (phase[0] != PHASE_TEXT) {
+                        if (phase[0] != PHASE_NONE) {
+                            System.out.println();
+                        }
+                        System.out.print("[输出] ");
+                        phase[0] = PHASE_TEXT;
+                    }
                     System.out.print(chunk);
                 }
                 for (JsonNode tc : delta.path("tool_calls")) {

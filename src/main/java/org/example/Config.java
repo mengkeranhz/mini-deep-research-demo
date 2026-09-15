@@ -18,7 +18,8 @@ import java.util.regex.Pattern;
 public final class Config {
 
     public record Llm(String provider, String baseUrl, String model, String apiKey,
-                      int maxTokens, double temperature, boolean streaming) {}
+                      int maxTokens, double temperature, boolean streaming,
+                      int thinkingBudgetTokens) {}
 
     public record WebSearch(String tavilyApiKey) {}
 
@@ -43,7 +44,8 @@ public final class Config {
                         str(llm, "provider"), str(llm, "base-url"), str(llm, "model"), str(llm, "api-key"),
                         intVal(llm, "max-tokens", 8192),
                         dblVal(llm, "temperature", 0),
-                        boolVal(llm, "streaming", true)),
+                        boolVal(llm, "streaming", true),
+                        intVal(llm, "thinking-budget-tokens", 0)),
                 new WebSearch(str(webSearch, "tavily-api-key")),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
                 new Storage(str(storage, "root-dir")));

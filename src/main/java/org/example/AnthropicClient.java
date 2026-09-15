@@ -28,6 +28,9 @@ final class AnthropicClient implements LlmClient {
             .connectTimeout(Duration.ofSeconds(15))
             .build();
 
+    /** 流式打印相位（对齐非流式 [思考]/[输出] 标签，块切换时补标签与换行）：0=无，1=思考，2=文本。 */
+    private static final int PHASE_NONE = 0, PHASE_THINKING = 1, PHASE_TEXT = 2;
+
     private final Config.Llm cfg;
 
     AnthropicClient(Config.Llm cfg) {
@@ -48,6 +51,11 @@ final class AnthropicClient implements LlmClient {
                     .put("stream", cfg.streaming());
             if (!system.isBlank()) {
                 body.put("system", system);
+            }
+            if (cfg.thinkingBudgetTokens() > 0) {
+                body.putObject("thinking")
+                        .put("type", "enabled")
+                        .put("budget_tokens", cfg.thinkingBudgetTokens());
             }
             body.set("messages", messages(conversation));
             ArrayNode toolDefs = body.putArray("tools");
@@ -97,6 +105,7 @@ final class AnthropicClient implements LlmClient {
         List<Block> blocks = new ArrayList<>();
         Map<Integer, ObjectNode> open = new HashMap<>(); // index → 累积中的 content block
         int[] usage = {0, 0};
+        int[] phase = {PHASE_NONE}; // 流式打印相位：块切换时补 [思考]/[输出] 标签与换行
         try (Stream<String> lines = resp.body()) {
             lines.filter(line -> line.startsWith("data:")).forEach(line -> {
                 String payload = line.substring(5).strip();
@@ -109,7 +118,7 @@ final class AnthropicClient implements LlmClient {
                             usage[0] = d.path("message").path("usage").path("input_tokens").asInt();
                     case "content_block_start" ->
                             open.put(d.path("index").asInt(), (ObjectNode) d.get("content_block"));
-                    case "content_block_delta" -> accumulate(open.get(d.path("index").asInt()), d.path("delta"));
+                    case "content_block_delta" -> accumulate(open.get(d.path("index").asInt()), d.path("delta"), phase);
                     case "content_block_stop" -> {
                         ObjectNode b = open.remove(d.path("index").asInt());
                         if (b != null) {
@@ -125,18 +134,32 @@ final class AnthropicClient implements LlmClient {
         return new LlmResponse(blocks, usage[0], usage[1]);
     }
 
-    /** 按 delta 类型累积到块上，文本/思考增量同时实时打印。 */
-    private static void accumulate(ObjectNode b, JsonNode delta) {
+    /** 按 delta 类型累积到块上，文本/思考增量同时实时打印（对齐非流式的 [思考]/[输出] 标签）。 */
+    private static void accumulate(ObjectNode b, JsonNode delta, int[] phase) {
         if (b == null) {
             return;
         }
         switch (delta.path("type").asText()) {
             case "text_delta" -> {
                 b.put("text", b.path("text").asText("") + delta.path("text").asText());
+                if (phase[0] != PHASE_TEXT) {
+                    if (phase[0] != PHASE_NONE) {
+                        System.out.println();
+                    }
+                    System.out.print("[输出] ");
+                    phase[0] = PHASE_TEXT;
+                }
                 System.out.print(delta.path("text").asText());
             }
             case "thinking_delta" -> {
                 b.put("thinking", b.path("thinking").asText("") + delta.path("thinking").asText());
+                if (phase[0] != PHASE_THINKING) {
+                    if (phase[0] != PHASE_NONE) {
+                        System.out.println();
+                    }
+                    System.out.print(Console.thinking("[思考] "));
+                    phase[0] = PHASE_THINKING;
+                }
                 System.out.print(Console.thinking(delta.path("thinking").asText()));
             }
             case "signature_delta" ->

@@ -103,7 +103,7 @@ public class ExecuteTaskTool implements AgentTool {
         if (subLlm == null) {
             subLlm = LlmClient.create(cfg.llm());
             subQuietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
-                    cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
+                    cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false, 0));
         }
         // 子代理能力与父对齐：开放 analyze_query / update_task / final_answer，仅排除 execute_task 防嵌套展开
         TaskStore subTasks = new TaskStore();

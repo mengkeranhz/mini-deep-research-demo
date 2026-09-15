@@ -25,6 +25,8 @@ abstract class AgentLoop<T> {
     protected final FactsStore facts;
     protected final TaskStore tasks;
     private final FinalVerifier verifier; // 无工具、非流式：提交的最终答案终止校验用
+    /** 无工具、非流式：上下文压缩摘要等嵌套调用用，避免增量输出打进主循环控制台。 */
+    private final LlmClient quietLlm;
     private final boolean streaming;
     /** 最终校验连续失败计数：任何干活（调用工具）轮次重置，达到 3 次即 best-effort 返回。 */
     private int failStreak = 0;
@@ -36,6 +38,7 @@ abstract class AgentLoop<T> {
         this.facts = facts;
         this.tasks = tasks;
         this.verifier = new FinalVerifier(quietLlm);
+        this.quietLlm = quietLlm;
         this.streaming = streaming;
     }
 
@@ -206,7 +209,7 @@ abstract class AgentLoop<T> {
             if (resp.inputTokens() > CONTEXT_TOKEN_THRESHOLD) {
                 System.out.println("\n[" + tag() + "上下文压缩] inputTokens=" + resp.inputTokens()
                         + " 超过阈值 " + CONTEXT_TOKEN_THRESHOLD + "，开始压缩…");
-                String summary = llm.summarize(transcript.toString());
+                String summary = quietLlm.summarize(transcript.toString());
                 System.out.println("[" + tag() + "上下文压缩] 摘要:\n" + summary);
                 // 快照压缩时现算——本轮工具调用可能刚更新过 Store，不能用轮首旧值
                 StringBuilder rebuilt = new StringBuilder(seedLabel()).append("：\n").append(seed);
