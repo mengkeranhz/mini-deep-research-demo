@@ -12,7 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 public class Agent extends AgentLoop<String> {
 
     /** 父代理最大轮次。 */
-    private static final int MAX_ROUNDS = 60;
+    private static final int MAX_ROUNDS = 90;
 
     /** 解析强制重规划参数复用。 */
     private static final ObjectMapper JSON = new ObjectMapper();
