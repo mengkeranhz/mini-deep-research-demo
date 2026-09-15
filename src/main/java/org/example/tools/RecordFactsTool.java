@@ -28,7 +28,7 @@ public class RecordFactsTool implements AgentTool {
 
     @Override
     public ToolDef definition() {
-        return new ToolDef(name(), "把检索到的关键数据与结论写入事实账本。每得到一条可用数据就立即入账（不要攒到最后批量补）；否定性结论（某数据不存在、经充分检索仍无法查到、某命题被证伪、公布频率或口径与任务所设不符）同样立即入账，source 填支撑该判断的页面（无法查到的填已检索的主要权威渠道）；最终答案的数据以账本为准。发现之前入账的事实有误时，用 remove=true 删除该条再重写入账。",
+        return new ToolDef(name(), "把检索到的关键数据与结论写入事实账本。每得到一条可用数据就立即入账（不要攒到最后批量补）；否定性结论（某数据不存在、经充分检索与工程获取仍无法查到、某命题被证伪、公布频率或口径与任务所设不符）同样立即入账，source 填支撑该判断的页面（无法查到的填已检索的主要权威渠道）；最终答案的数据以账本为准。发现之前入账的事实有误时，用 remove=true 删除该条再重写入账。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "facts", Map.of("type", "array", "description", "本次入账的事实数组",
