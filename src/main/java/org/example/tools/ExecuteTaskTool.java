@@ -18,7 +18,7 @@ import java.util.Set;
 /**
  * execute_task：把一个自包含任务派发给新建的子 Agent Loop 执行（每次全新上下文）。
  * 子代理只能看到原始述求、本任务文本与事实账本（同一 FactsStore 实例，父子共享），
- * 看不到父对话与计划清单；某轮不再调用工具即完成，结果作为 tool_result 回到父上下文。
+ * 看不到父对话与计划清单；子代理与父对齐——调用 final_answer 提交结果并做 LLM 终止校验。
  */
 public class ExecuteTaskTool implements AgentTool {
 
@@ -32,8 +32,8 @@ public class ExecuteTaskTool implements AgentTool {
     private final FactsStore facts;
     private final AmapClient amap;
 
-    private ToolRegistry subRegistry; // 懒加载一次，跨调用复用（Amap 节流全局唯一）
-    private LlmClient subLlm;        // 懒加载一次（cfg.llm()，流式，子代理过程实时可见）
+    private LlmClient subLlm;      // 懒加载一次（cfg.llm()，流式，子代理过程实时可见）
+    private LlmClient subQuietLlm; // 懒加载一次（无工具、非流式，子代理终止校验用）
 
     /** 构造器只赋字段不执行——子注册表场景 tasks 为 null，也能安全实例化后被排除。 */
     public ExecuteTaskTool(Config.Data cfg, TaskStore tasks, FactsStore facts, AmapClient amap) {
@@ -94,14 +94,18 @@ public class ExecuteTaskTool implements AgentTool {
                 : "（子代理未在轮次上限内完成，以下为部分结果，任务保持进行中）\n" + body;
     }
 
-    /** 懒加载子代理依赖并新建子代理：注册表排除规划类工具（子代理不拆解、不派发，杜绝嵌套展开）。 */
+    /** 每次调用新建独立子代理与独立 TaskStore（子代理可自主 analyze_query 规划，不与父共享）；
+     *  LLM 客户端（流式 + 校验用非流式）懒加载一次复用，Amap 节流全局唯一。 */
     private SubAgent subAgent() {
-        if (subRegistry == null) {
-            subRegistry = new ToolRegistry(cfg, null, facts, amap,
-                    Set.of("analyze_query", "update_task", "execute_task"));
+        if (subLlm == null) {
             subLlm = LlmClient.create(cfg.llm());
+            subQuietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
+                    cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
         }
-        return new SubAgent(subLlm, subRegistry, facts, cfg.llm().streaming());
+        // 子代理能力与父对齐：开放 analyze_query / update_task / final_answer，仅排除 execute_task 防嵌套展开
+        TaskStore subTasks = new TaskStore();
+        ToolRegistry subRegistry = new ToolRegistry(cfg, subTasks, facts, amap, Set.of("execute_task"));
+        return new SubAgent(subLlm, subQuietLlm, subRegistry, facts, subTasks, cfg.llm().streaming());
     }
 
     /** 组装子代理简报：只共享事实账本，不共享计划——子代理以原始述求 + 自包含任务文本锚定工作，
