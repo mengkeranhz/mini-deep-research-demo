@@ -20,8 +20,9 @@ public class WebSearchTool implements AgentTool {
 
     private static final ObjectMapper M = new ObjectMapper();
     private static final String API = "https://api.tavily.com/search";
-    /** 控制台预览中每条摘要整行的最大长度（含「   摘要: 」前缀）。 */
-    private static final int SNIPPET_WIDTH = 80;
+    /** 摘要行的前缀与控制台预览中摘要正文的截短长度（字符）。 */
+    private static final String ABSTRACT_PREFIX = "   摘要: ";
+    private static final int SNIPPET_WIDTH = 60;
 
     private final Config.WebSearch cfg;
 
@@ -80,7 +81,7 @@ public class WebSearchTool implements AgentTool {
         for (JsonNode r : M.readTree(resp.body()).path("results")) {
             sb.append(++n).append(". ").append(r.path("title").asText())
                     .append("\n   链接: ").append(r.path("url").asText())
-                    .append("\n   摘要: ").append(r.path("content").asText()).append('\n');
+                    .append('\n').append(ABSTRACT_PREFIX).append(r.path("content").asText()).append('\n');
         }
         if (n == 0) {
             return domains.isEmpty()
@@ -91,17 +92,50 @@ public class WebSearchTool implements AgentTool {
                 + "得到 " + n + " 条结果:\n" + sb;
     }
 
-    /** 控制台精简预览：标题与链接原样，每条摘要截成一行短摘——完整结果仍回传模型，不影响检索质量。 */
+    /** 控制台精简预览：每条结果压成「编号标题/链接/单行短摘要」——Tavily 摘要正文常自带换行
+     *  （整页导航、markdown 表格噪声），只有首行带「摘要:」前缀，须按条目边界把续行一并拍扁收进摘要。 */
     @Override
     public String consolePreview(String content) {
-        StringBuilder sb = new StringBuilder();
-        for (String line : content.split("\n", -1)) {
-            if (line.startsWith("   摘要: ") && line.length() > SNIPPET_WIDTH) {
-                line = line.substring(0, SNIPPET_WIDTH) + "…";
-            }
-            sb.append(line).append('\n');
+        if (!content.contains(ABSTRACT_PREFIX)) {
+            return content; // 未搜到结果等短消息，无需精简
         }
-        return sb.append("（控制台摘要已截短，完整结果已回传模型）").toString();
+        StringBuilder sb = new StringBuilder();
+        StringBuilder body = new StringBuilder(); // 当前摘要正文（含续行）累积
+        boolean clipped = false;
+        for (String line : content.split("\n", -1)) {
+            if (line.matches("\\d+\\. .*") || line.startsWith("搜索「")) { // 下一条结果边界：先结算上一条摘要
+                clipped |= appendAbstract(sb, body);
+                sb.append(line).append('\n');
+            } else if (line.startsWith("   链接: ")) {
+                clipped |= appendAbstract(sb, body);
+                sb.append(line).append('\n');
+            } else if (line.startsWith(ABSTRACT_PREFIX)) {
+                body.append(line.substring(ABSTRACT_PREFIX.length())).append(' ');
+            } else if (!body.isEmpty()) {
+                body.append(line.strip()).append(' '); // 摘要续行：拍扁合并
+            } else if (!line.isBlank()) {
+                sb.append(line).append('\n');
+            }
+        }
+        clipped |= appendAbstract(sb, body);
+        return sb.append(clipped ? "（控制台摘要已截短，完整结果已回传模型）" : "").toString();
+    }
+
+    /** 结算累积的摘要正文：空白压成单空格、截短后单行输出；返回是否发生了截短。 */
+    private static boolean appendAbstract(StringBuilder sb, StringBuilder body) {
+        if (body.isEmpty()) {
+            return false;
+        }
+        String s = body.toString().replaceAll("\\s+", " ").strip();
+        sb.append(ABSTRACT_PREFIX);
+        if (s.length() > SNIPPET_WIDTH) {
+            sb.append(s, 0, SNIPPET_WIDTH).append('…');
+        } else {
+            sb.append(s);
+        }
+        sb.append('\n');
+        body.setLength(0);
+        return s.length() > SNIPPET_WIDTH;
     }
 
     /** domains 归一化：小写、去协议、截首个 /、去 www. 前缀（否则只剩精确 host 匹配，静默漏掉子域名），去空去重。 */
