@@ -56,8 +56,8 @@ public class Agent {
         this.facts = new FactsStore();
         // 纯编排器：检索/取数/入账全部下沉子代理；保留 run_code 与 current_time 供综合期计算与日期核对；
         this.registry = new ToolRegistry(cfg, tasks, facts, Set.of(
-                "web_search", "fetch_url", "read_file", "search_place", "search_nearby", "route_query",
-                "record_facts"));
+                "web_search", "locate_sources", "fetch_url", "read_file", "search_place", "search_nearby",
+                "route_query", "record_facts"));
     }
 
     public String run(String request) {
