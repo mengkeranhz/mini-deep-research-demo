@@ -15,6 +15,7 @@ import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
 
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -91,6 +92,7 @@ public class AnalyzeQueryTool implements AgentTool {
                     + "已完成任务在新清单中保留原文（逐字一致）即继承完成状态，也可只列剩余任务。"));
         }
         planMsgs.add(Msg.user(query));
+        planMsgs.add(Msg.system(CurrentTimeTool.nowText(ZoneId.systemDefault())));
         String raw = LlmClient.create(quiet).call(List.of(), planMsgs).text();
         JsonNode root = extractJson(raw);
 
