@@ -20,6 +20,8 @@ public class WebSearchTool implements AgentTool {
 
     private static final ObjectMapper M = new ObjectMapper();
     private static final String API = "https://api.tavily.com/search";
+    /** 控制台预览中每条摘要整行的最大长度（含「   摘要: 」前缀）。 */
+    private static final int SNIPPET_WIDTH = 80;
 
     private final Config.WebSearch cfg;
 
@@ -87,6 +89,19 @@ public class WebSearchTool implements AgentTool {
         }
         return "搜索「" + query + "」" + (domains.isEmpty() ? "" : "（限定 " + domains + "）")
                 + "得到 " + n + " 条结果:\n" + sb;
+    }
+
+    /** 控制台精简预览：标题与链接原样，每条摘要截成一行短摘——完整结果仍回传模型，不影响检索质量。 */
+    @Override
+    public String consolePreview(String content) {
+        StringBuilder sb = new StringBuilder();
+        for (String line : content.split("\n", -1)) {
+            if (line.startsWith("   摘要: ") && line.length() > SNIPPET_WIDTH) {
+                line = line.substring(0, SNIPPET_WIDTH) + "…";
+            }
+            sb.append(line).append('\n');
+        }
+        return sb.append("（控制台摘要已截短，完整结果已回传模型）").toString();
     }
 
     /** domains 归一化：小写、去协议、截首个 /、去 www. 前缀（否则只剩精确 host 匹配，静默漏掉子域名），去空去重。 */

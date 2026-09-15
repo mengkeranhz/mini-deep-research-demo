@@ -172,7 +172,7 @@ abstract class AgentLoop<T> {
             String finalAnswer = null;
             for (Block.ToolUse call : toolCalls) {
                 ToolRegistry.ToolOutput out = registry.run(call);
-                System.out.println("[" + tag() + "工具结果]\n" + preview(out.content()));
+                System.out.println("[" + tag() + "工具结果]\n" + preview(out.preview()));
                 messages.add(Msg.tool(new Block.ToolResult(call.id(), out.content(), out.isError())));
                 transcript.append("  [").append(call.name()).append(" 结果] ")
                         .append(body(out.content())).append('\n');
@@ -255,7 +255,7 @@ abstract class AgentLoop<T> {
         }
     }
 
-    /** 控制台打印工具结果正文：保留换行与结构，仅对超长输出截断并标注总长。 */
+    /** 控制台打印工具结果正文：优先用工具自述的精简预览（web_search/read_file 已覆写），仍超长时按上限截断并标注总长。 */
     private static String preview(String content) {
         String s = content.strip();
         return s.length() <= CONSOLE_TOOL_BODY_LIMIT ? s

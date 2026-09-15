@@ -20,6 +20,10 @@ import java.util.Map;
 /** read_file：文本文件按行切片阅读；PDF 用 PDFBox 提取全文后同样按行切片。 */
 public class ReadFileTool implements AgentTool {
 
+    /** 控制台预览保留的最大行数与每行宽度。 */
+    private static final int PREVIEW_LINES = 30;
+    private static final int PREVIEW_LINE_WIDTH = 120;
+
     private final Path root;
 
     public ReadFileTool(Config.Storage storage) {
@@ -121,6 +125,23 @@ public class ReadFileTool implements AgentTool {
 
     /** 一个命中段落：起始行、结束行、文本与命中的不同关键词数。 */
     private record Hit(int start, int end, String text, int keywordCount) {}
+
+    /** 控制台精简预览：保留前若干行、超长行截断——fetch_url 抓回的网页段落动辄整段一行，完整内容仍回传模型。 */
+    @Override
+    public String consolePreview(String content) {
+        String[] lines = content.split("\n", -1);
+        StringBuilder sb = new StringBuilder();
+        int shown = Math.min(lines.length, PREVIEW_LINES);
+        for (int i = 0; i < shown; i++) {
+            String line = lines[i];
+            sb.append(line.length() > PREVIEW_LINE_WIDTH ? line.substring(0, PREVIEW_LINE_WIDTH) + "…" : line)
+                    .append('\n');
+        }
+        if (lines.length > shown) {
+            sb.append("…（共 ").append(lines.length).append(" 行，控制台已截断，完整内容已回传模型）");
+        }
+        return sb.toString();
+    }
 
     /** 相对路径相对于根目录解析，绝对路径原样使用。 */
     private Path resolve(String path) {

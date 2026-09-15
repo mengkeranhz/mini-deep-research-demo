@@ -38,10 +38,19 @@ public class ToolRegistry {
         ToolDef definition();
 
         String execute(JsonNode input) throws Exception;
+
+        /** 控制台打印用的精简预览（默认原样）：只影响人看的输出，回传 LLM 的完整结果不受影响。冗长工具（web_search/read_file）覆写。 */
+        default String consolePreview(String content) {
+            return content;
+        }
     }
 
-    /** 工具执行结果；isError=true 时以 is_error 的 tool_result 返回给 LLM（最小容错）。 */
-    public record ToolOutput(String content, boolean isError) {}
+    /** 工具执行结果；isError=true 时以 is_error 的 tool_result 返回给 LLM（最小容错）；preview 为控制台精简展示。 */
+    public record ToolOutput(String content, boolean isError, String preview) {
+        public ToolOutput(String content, boolean isError) {
+            this(content, isError, content);
+        }
+    }
 
     /** 编排模式（主+子）下父代理不直接持有的工具：检索/取数/入账全部下沉子代理。 */
     private static final Set<String> ORCHESTRATOR_EXCLUDES = Set.of(
@@ -112,7 +121,8 @@ public class ToolRegistry {
             return new ToolOutput("未知工具: " + call.name(), true);
         }
         try {
-            return new ToolOutput(tool.execute(call.input()), false);
+            String content = tool.execute(call.input());
+            return new ToolOutput(content, false, tool.consolePreview(content));
         } catch (Exception e) {
             return new ToolOutput("工具执行失败: " + e, true);
         }
