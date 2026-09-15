@@ -28,7 +28,7 @@ public class UpdateTaskTool implements AgentTool {
 
     @Override
     public ToolDef definition() {
-        return new ToolDef(name(), "更新任务清单中某任务的状态：开始执行标 in_progress，完成标 done，可附一句关键结果备注。",
+        return new ToolDef(name(), "任务状态由 execute_task 自动维护；本工具用于人工修正（跳过、回退、补备注）：更新某任务的状态与备注。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "task", Map.of("type", "string", "description", "任务 id（如 t1）"),

@@ -45,6 +45,11 @@ public class CurrentTimeTool implements AgentTool {
                 return "无法识别的时区: " + tzName + "，请使用 IANA 时区名，如 Asia/Shanghai";
             }
         }
+        return nowText(zone);
+    }
+
+    /** 当前时间文本：工具输出与 Agent 每轮系统注入共用同一格式。 */
+    public static String nowText(ZoneId zone) {
         ZonedDateTime now = ZonedDateTime.now(zone);
         return "当前时间: " + now.format(DATE_TIME)
                 + "（星期" + WEEKDAYS.get(now.getDayOfWeek().getValue() - 1) + "）"

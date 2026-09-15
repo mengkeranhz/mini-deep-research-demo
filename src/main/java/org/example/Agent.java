@@ -2,15 +2,18 @@ package org.example;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.tools.CurrentTimeTool;
 
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
- * Agent loop：
- * 轮次上限 → 注入任务进度与事实账本快照 → LLM（人格 + 工具元信息 + 对话与思考）→
- * 依次执行工具收集结果（正文写入对话稿）→ 无工具调用时对照任务述求与事实账本做最终校验，通过即返回 →
- * 超阈值压缩上下文（重建时显式携带原始述求、进度摘要与两份核心状态快照）。
+ * 父 Agent Loop（编排器）：规划（analyze_query）→ 派发（execute_task，每次新建子代理执行）→
+ * 综合事实账本与子代理结果输出最终答案。无工具调用轮对照述求与账本做最终校验：
+ * 未通过则程序化重新规划（缺陷注入、进度继承），连续 3 次未通过 best-effort 返回；
+ * 超阈值压缩上下文（重建时显式携带原始述求、进度摘要、任务与账本快照、草稿答案）。
  */
 public class Agent {
     static final int MAX_ROUNDS = 120;
@@ -41,6 +44,8 @@ public class Agent {
     private final ToolRegistry registry;
     private final TaskStore tasks;
     private final FactsStore facts;
+    /** 最终校验连续失败计数：任何干活（调用工具）轮次重置，达到 3 次即 best-effort 返回。 */
+    private int failStreak = 0;
 
     public Agent() {
         this.cfg = Config.load();
@@ -49,10 +54,14 @@ public class Agent {
                 cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
         this.tasks = new TaskStore();
         this.facts = new FactsStore();
-        this.registry = new ToolRegistry(cfg, tasks, facts);
+        // 纯编排器：检索/取数/入账全部下沉子代理；保留 run_code 与 current_time 供综合期计算与日期核对；
+        this.registry = new ToolRegistry(cfg, tasks, facts, Set.of(
+                "web_search", "fetch_url", "read_file", "search_place", "search_nearby", "route_query",
+                "record_facts"));
     }
 
     public String run(String request) {
+        tasks.original(request); // 子代理简报锚点：无论是否规划，原始述求常驻（重规划不清）
         List<Msg> messages = new ArrayList<>();
         messages.add(Msg.system(SystemPrompt.PERSONA));
         messages.add(Msg.user(request));
@@ -62,27 +71,21 @@ public class Agent {
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
 
-            // LLM 看不到 TaskStore / FactsStore 外部状态 → 每轮重算两个快照，
-            // 作为新系统块注入（人格之后、对话之前）；只放进本次调用的副本，messages 不留旧快照，
+            // LLM 看不到外部时钟与 TaskStore / FactsStore 外部状态 → 每轮注入当前时间并重算两个快照，
+            // 作为新系统块注入（人格之后、对话之前）；只放进本次调用的副本，messages 不留旧块，
             // 天然无陈旧堆积、压缩重建也无需处理
             String snapshot = tasks.snapshot();
             String factsSnapshot = facts.snapshot();
-            List<Msg> callMessages = messages;
-            if (snapshot != null || factsSnapshot != null) {
-                if (snapshot != null) {
-                    System.out.println(Console.header("[任务快照已注入] ") + tasks.progress());
-                }
-                if (factsSnapshot != null) {
-                    System.out.println(Console.header("[事实账本已注入] ") + facts.size() + " 条");
-                }
-                callMessages = new ArrayList<>(messages);
-                int injectAt = 1;
-                if (snapshot != null) {
-                    callMessages.add(injectAt++, Msg.system(snapshot));
-                }
-                if (factsSnapshot != null) {
-                    callMessages.add(injectAt, Msg.system(factsSnapshot));
-                }
+            List<Msg> callMessages = new ArrayList<>(messages);
+            int injectAt = 1;
+            callMessages.add(injectAt++, Msg.system(CurrentTimeTool.nowText(ZoneId.systemDefault())));
+            if (snapshot != null) {
+                System.out.println(Console.header("[任务快照已注入] ") + tasks.progress());
+                callMessages.add(injectAt++, Msg.system(snapshot));
+            }
+            if (factsSnapshot != null) {
+                System.out.println(Console.header("[事实账本已注入] ") + facts.size() + " 条");
+                callMessages.add(injectAt, Msg.system(factsSnapshot));
             }
 
             LlmResponse resp = llm.call(registry.definitions(), callMessages);
@@ -111,17 +114,40 @@ public class Agent {
                     if (!verdict.pass()) {
                         String defects = String.join("\n", verdict.defects());
                         System.out.println("\n[最终校验] 未通过：\n" + defects);
+                        tasks.draft(candidate);
+                        // 连续 3 次校验失败且中间无干活轮次：best-effort 返回当前最优答案，避免死循环
+                        if (++failStreak >= 3) {
+                            System.out.println(Console.warn("[警告] 最终校验连续 " + failStreak
+                                    + " 次未通过，best-effort 返回当前答案"));
+                            return candidate + "\n\n（注意：本回答未通过最终校验，遗留缺陷：\n" + defects + "\n）";
+                        }
+                        // 确定性重规划：程序化调用 analyze_query（缺陷注入，进度与账本继承，只补剩余工作）；
+                        // 失败则降级为仅反馈缺陷，不阻断
+                        try {
+                            ToolRegistry.AgentTool analyzer = registry.tool("analyze_query");
+                            if (analyzer != null) {
+                                String replanned = analyzer.execute(JSON.createObjectNode().put("query",
+                                        baseline + "\n上一版回答未通过最终校验，缺陷：\n" + defects
+                                                + "\n请结合缺陷与事实账本重新规划，只补剩余工作"));
+                                System.out.println("[强制重规划]\n" + replanned);
+                            }
+                        } catch (Exception e) {
+                            System.out.println(Console.warn("[强制重规划失败，仅反馈缺陷] " + e));
+                        }
                         messages.add(Msg.assistant(resp.blocks()));
                         messages.add(Msg.user("你的回答未通过最终校验，存在以下缺陷：\n" + defects
-                                + "\n\n请修正后【重新输出完整的最终回答】——不要只输出补丁，"
-                                + "必须完整覆盖述求所问；必要时继续检索，新数据先 record_facts 入账。"));
+                                + "\n\n已按缺陷重新规划任务清单（见任务进度快照）。请用 execute_task 执行剩余待办任务"
+                                + "（子代理检索取数并入账），然后【重新输出完整的最终回答】——不要只输出补丁，"
+                                + "必须完整覆盖述求所问。"));
                         transcript.append("助手: ").append(candidate).append('\n');
                         continue;
                     }
+                    tasks.draft(null); // 本版通过，旧草稿使命结束
                     System.out.println("[最终校验] 通过");
                 }
                 return candidate; // 无工具调用 → 校验通过（或无账本可对照），即最终答案
             }
+            failStreak = 0; // 任何干活轮次重置校验连败计数
             for (Block.ToolUse u : toolCalls) {
                 System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));
             }
@@ -166,6 +192,8 @@ public class Agent {
                 rebuilt.append("\n\n之前的执行进度摘要：\n").append(summary);
                 appendSnapshot(rebuilt, tasks.snapshot());
                 appendSnapshot(rebuilt, facts.snapshot());
+                appendSnapshot(rebuilt, tasks.draft() == null ? null
+                        : "上一版草稿答案（未通过校验，需修正）：\n" + tasks.draft());
                 rebuilt.append("\n\n请基于以上进度继续完成任务；最终答案的数据以事实账本为准。");
                 messages = new ArrayList<>(List.of(
                         Msg.system(SystemPrompt.PERSONA), Msg.user(rebuilt.toString())));
@@ -182,8 +210,8 @@ public class Agent {
         }
     }
 
-    /** 非流式模式下的统一打印：思考与结论文本。 */
-    private static void printBlocks(LlmResponse resp) {
+    /** 非流式模式下的统一打印：思考与结论文本（包可见，SubAgent 复用）。 */
+    static void printBlocks(LlmResponse resp) {
         for (Block b : resp.blocks()) {
             if (b instanceof Block.Thinking t) {
                 System.out.println(Console.thinking("[思考] " + t.thinking()));
@@ -264,14 +292,14 @@ public class Agent {
         return defects.isEmpty() ? null : new Verdict(false, defects);
     }
 
-    /** 控制台预览工具结果前 200 字符。 */
-    private static String preview(String content) {
+    /** 控制台预览工具结果前 200 字符（包可见，SubAgent 复用）。 */
+    static String preview(String content) {
         String oneLine = content.replaceAll("\\s+", " ");
         return oneLine.length() <= 200 ? oneLine : oneLine.substring(0, 200) + "…";
     }
 
-    /** 对话稿中的工具结果正文：保住数值与来源链接所需的长度，超出截断。 */
-    private static String body(String content) {
+    /** 对话稿中的工具结果正文：保住数值与来源链接所需的长度，超出截断（包可见，SubAgent 复用）。 */
+    static String body(String content) {
         String s = content.strip();
         return s.length() <= TRANSCRIPT_TOOL_BODY_LIMIT ? s
                 : s.substring(0, TRANSCRIPT_TOOL_BODY_LIMIT) + "…（截断）";

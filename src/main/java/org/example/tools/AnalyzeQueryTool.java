@@ -36,6 +36,7 @@ public class AnalyzeQueryTool implements AgentTool {
             - core_needs: 核心述求数组（用户最核心要回答的几个问题/要点，每条一句短语），无则空数组
             - tasks: 3-6 个可执行任务，每项为一个任务描述字符串。
               任务按数据获取方式组织：检索能解决的写检索任务，检索拿不到的写工程任务（run_code），不要都规划成换关键词的搜索。
+              每个任务将由独立子代理执行——子代理只能看到原始述求与该任务文本，任务描述必须自包含：写明背景、范围、时期、口径、单位与期望产出。
             若提供了当前进度或事实账本：结合已知信息规划，只补剩余工作；目标需要调整时按调整后的目标给出。
             """;
 
@@ -114,7 +115,7 @@ public class AnalyzeQueryTool implements AgentTool {
             o.put("id", t.id()).put("content", t.content()).put("status", t.status());
         }
         return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
-                + "\n任务清单已保存。请从第一个待办任务开始执行。";
+                + "\n任务清单已保存。请按顺序用 execute_task 执行待办任务。";
     }
 
     /** 字符串数组读取：非数组返回空列表，元素去空白、去空项。 */

@@ -19,6 +19,8 @@ public class TaskStore {
     private List<String> constraints = List.of();
     private List<String> unknowns = List.of();
     private List<String> coreNeeds = List.of();
+    private String originalRequest; // Agent.run 开始写入：原始述求，子代理简报锚点；reset 不清（重规划保留）
+    private String draft;           // 最近一次校验未通过的草稿答案；上下文压缩重建时显式携带
     private final List<Task> tasks = new ArrayList<>();
 
     /** 写入新任务清单（重复调用即重新规划；goal 为本次分析的目标述求，基线随之更新，
@@ -79,6 +81,24 @@ public class TaskStore {
     /** 当前任务基线（最近一次规划的目标述求）；未规划过为 null，届时以原始述求为准。 */
     public String goal() {
         return goal;
+    }
+
+    /** 原始述求：Agent.run 开始写入，此后不变（重规划调整的是 goal，不改写本字段）。 */
+    public void original(String request) {
+        this.originalRequest = request;
+    }
+
+    public String original() {
+        return originalRequest;
+    }
+
+    /** 最近一次未通过校验的草稿答案；传入 null 即清除（本版通过校验时）。 */
+    public void draft(String d) {
+        this.draft = d;
+    }
+
+    public String draft() {
+        return draft;
     }
 
     /** 核心述求（最近一次规划解析出的要点），最终校验逐条核对。 */

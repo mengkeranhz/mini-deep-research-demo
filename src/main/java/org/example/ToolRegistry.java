@@ -15,6 +15,7 @@ import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
@@ -42,12 +43,21 @@ public class ToolRegistry {
 
     private final Map<String, AgentTool> tools = new LinkedHashMap<>();
 
-    public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts) {
-        AmapClient amap = new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs());
+    /** 注册时新建 AmapClient（QPS 节流随本实例生效）；excludeNames 中的工具不注册。 */
+    public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, Set<String> excludeNames) {
+        this(cfg, tasks, facts, new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs()),
+                excludeNames);
+    }
+
+    /** 复用传入 AmapClient 注册（父子注册表共用一个实例 → QPS 节流全局唯一）。
+     *  过滤在实例化之后——被排除的工具构造器只赋字段不执行，tasks=null 也安全。 */
+    public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, AmapClient amap,
+                        Set<String> excludeNames) {
         scanPackage(TOOL_PACKAGE).stream()
                 .filter(ToolRegistry::isToolClass)
                 .sorted(Comparator.comparing(Class::getSimpleName)) // 按类名稳定排序
                 .map(c -> instantiate(c, cfg, amap, tasks, facts))
+                .filter(t -> !excludeNames.contains(t.name()))
                 .forEach(this::register);
     }
 
@@ -57,6 +67,11 @@ public class ToolRegistry {
 
     public List<ToolDef> definitions() {
         return tools.values().stream().map(AgentTool::definition).toList();
+    }
+
+    /** 按名称取工具（供 Agent 程序化强制调用，如校验失败后的确定性重规划）；未注册返回 null。 */
+    public AgentTool tool(String name) {
+        return tools.get(name);
     }
 
     /** 分发执行；未知工具与执行异常都转成 is_error 结果返回。 */
