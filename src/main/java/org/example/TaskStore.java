@@ -72,10 +72,14 @@ public class TaskStore {
         return List.copyOf(tasks);
     }
 
+    /** 已完成任务数：跨轮对比用，判断干活轮是否产出实际进展。 */
+    public int doneCount() {
+        return (int) tasks.stream().filter(t -> "done".equals(t.status())).count();
+    }
+
     /** 进度统计，如「2/5 完成」。 */
     public String progress() {
-        return tasks.stream().filter(t -> "done".equals(t.status())).count()
-                + "/" + tasks.size() + " 完成";
+        return doneCount() + "/" + tasks.size() + " 完成";
     }
 
     /** 当前任务基线（最近一次规划的目标述求）；未规划过为 null，届时以原始述求为准。 */

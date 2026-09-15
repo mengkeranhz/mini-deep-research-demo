@@ -10,7 +10,7 @@ import java.util.List;
 /**
  * 父子 Agent 共用的执行循环骨架：每轮注入当前时间与任务/账本快照 → 调模型 → 收集工具调用 →
  * 执行工具（每个结果一条 tool 消息）→ 提交（final_answer 或纯文本视为隐式提交）走 LLM 终止校验，
- * 未通过反馈缺陷并计数（连续 3 次 best-effort）；超阈值压缩上下文（重建时显式保留述求/简报、
+ * 未通过反馈缺陷并计数（连续 3 次且期间无实际产出即 best-effort）；超阈值压缩上下文（重建时显式保留述求/简报、
  * 进度摘要、任务与账本快照、草稿答案）。差异点（人格、日志前缀、轮次上限与横幅、缺陷反馈文案、
  * 失败后是否程序化重规划、压缩重建文案、结果组装）由子类模板方法提供。
  */
@@ -30,7 +30,7 @@ abstract class AgentLoop<T> {
     /** 无工具、非流式：上下文压缩摘要等嵌套调用用，避免增量输出打进主循环控制台。 */
     private final LlmClient quietLlm;
     private final boolean streaming;
-    /** 最终校验连续失败计数：任何干活（调用工具）轮次重置，达到 3 次即 best-effort 返回。 */
+    /** 最终校验连续失败计数：有实际产出的干活轮（账本新增事实或新完成任务）重置，达到 3 次即 best-effort 返回。 */
     private int failStreak = 0;
 
     protected AgentLoop(LlmClient llm, LlmClient quietLlm, ToolRegistry registry,
@@ -125,7 +125,7 @@ abstract class AgentLoop<T> {
                 // 纯文本回复不结束任务：视为隐式提交，同样走 LLM 终止校验，通过才是最终答案
                 String candidate = resp.text();
                 String baseline = tasks.goal() != null ? tasks.goal() : seed;
-                FinalVerifier.Verdict verdict = verifier.verify(baseline, tasks.coreNeeds(),
+                FinalVerifier.Verdict verdict = verifier.verify(tasks.original(), baseline, tasks.coreNeeds(),
                         tasks.snapshot(), facts.snapshot(), candidate);
                 if (verdict.pass()) {
                     tasks.draft(null); // 本版通过，旧草稿使命结束
@@ -166,6 +166,9 @@ abstract class AgentLoop<T> {
             }
 
             // 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传；对话稿写入结果正文（截断保数值与链接）
+            // 干活是否产出实际进展的判据：本轮账本条数 / 任务完成数是否变化（空转轮两者都不动）
+            int factsBefore = facts.size();
+            int doneBefore = tasks.doneCount();
             String finalAnswer = null;
             for (Block.ToolUse call : toolCalls) {
                 ToolRegistry.ToolOutput out = registry.run(call);
@@ -181,7 +184,7 @@ abstract class AgentLoop<T> {
             // 终止工具被调用：结果已回传，仍要做 LLM 终止校验；未通过则缺陷反馈 +（父）强制重规划
             if (finalAnswer != null) {
                 String baseline = tasks.goal() != null ? tasks.goal() : seed;
-                FinalVerifier.Verdict verdict = verifier.verify(baseline, tasks.coreNeeds(),
+                FinalVerifier.Verdict verdict = verifier.verify(tasks.original(), baseline, tasks.coreNeeds(),
                         tasks.snapshot(), facts.snapshot(), finalAnswer);
                 if (verdict.pass()) {
                     tasks.draft(null); // 本版通过，旧草稿使命结束
@@ -201,7 +204,11 @@ abstract class AgentLoop<T> {
                 messages.add(Msg.user(defectFeedback(true, defects)));
                 continue;
             }
-            failStreak = 0; // 干活轮次（非提交）重置校验连败计数
+            // 干活轮产出实际进展（新增入账事实或新完成任务）才重置校验连败计数：
+            // 换关键词空转产不出新事实，不重置——连续失败即 best-effort，避免不可得述求死循环
+            if (facts.size() > factsBefore || tasks.doneCount() > doneBefore) {
+                failStreak = 0;
+            }
 
             // 以上次响应 input token 判断是否压缩（零额外调用）：丢弃全部历史（无 tool_use/tool_result 配对风险），
             // 以「述求/简报 + 进度摘要 + 任务与账本快照 + 草稿答案」重建，核心信息不丢

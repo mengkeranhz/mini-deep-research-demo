@@ -28,14 +28,14 @@ public class RecordFactsTool implements AgentTool {
 
     @Override
     public ToolDef definition() {
-        return new ToolDef(name(), "把检索到的关键数据写入事实账本。每得到一条可用数据就立即入账（不要攒到最后批量补）；最终答案的数据以账本为准。发现之前入账的事实有误时，用 remove=true 删除该条再重写入账。",
+        return new ToolDef(name(), "把检索到的关键数据与结论写入事实账本。每得到一条可用数据就立即入账（不要攒到最后批量补）；查实的否定性结论（某数据不存在、公布频率或口径与任务所设不符）同样立即入账，source 填支撑该判断的页面；最终答案的数据以账本为准。发现之前入账的事实有误时，用 remove=true 删除该条再重写入账。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "facts", Map.of("type", "array", "description", "本次入账的事实数组",
                                         "items", Map.of("type", "object",
                                                 "properties", Map.of(
                                                         "fact", Map.of("type", "string",
-                                                                "description", "一条写清指标、时期、数值、口径的数据描述，如「杭州 2024 年 GDP 22062 亿元（初步核算）」；remove=true 时该字段为要删除的既有事实文本"),
+                                                                "description", "一条写清指标、时期、数值、口径的数据描述，如「杭州 2024 年 GDP 22062 亿元（初步核算）」；否定性结论写明对象与结论，如「XX 指标仅按年度公布，无季度数据」；remove=true 时该字段为要删除的既有事实文本"),
                                                         "source", Map.of("type", "string",
                                                                 "description", "来源链接或来源名"),
                                                         "note", Map.of("type", "string",

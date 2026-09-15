@@ -7,18 +7,21 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 最终校验器：用无工具、非流式的 quiet 客户端，对照任务述求、核心述求、计划与事实账本
- * 检查提交的最终答案，给出结构化 PASS / FAIL 判定。父 Agent 与子 Agent 共用。
+ * 最终校验器：用无工具、非流式的 quiet 客户端，对照任务述求（经调整时附原始述求审计）、
+ * 核心述求、计划与事实账本检查提交的最终答案，给出结构化 PASS / FAIL 判定。父 Agent 与子 Agent 共用。
  */
 final class FinalVerifier {
 
-    /** 校验提示词：对照「任务述求」「核心述求」「计划」「事实账本」检查「草稿回答」，首行 PASS / FAIL，其后逐条缺陷。 */
+    /** 校验提示词：对照「任务述求」（可能附「原始述求」）、「核心述求」「计划」「事实账本」检查「草稿回答」，
+     *  首行 PASS / FAIL，其后逐条缺陷；否定性结论与基线调整以账本证据裁决。 */
     private static final String PROMPT = """
-            你是答案校验器。对照「任务述求」「核心述求」「计划」「事实账本」检查「草稿回答」：
-            1. 述求与计划是否完成：不答非所问；核心述求逐条核对，草稿未回答到位的算缺陷；计划中未完成的任务、未解决的未知，草稿未处理且未说明原因的算缺陷；如实说明经充分尝试仍不可得并给出原因或替代方案的，不算缺陷。
-            2. 是否遵守计划中的约束。
-            3. 数据与结论是否与账本一致：账本已有而草稿遗漏、数值与账本不符、草稿声称未找到而账本已有，均算缺陷；账本中与本次述求无关的事实（如其他任务的数据）不算缺陷。
-            4. 关键事实是否附有来源。
+            你是答案校验器。对照「任务述求」（可能附「原始述求」）、「核心述求」「计划」「事实账本」检查「草稿回答」：
+            1. 述求与计划是否完成：不答非所问；核心述求逐条核对，草稿未回答到位的算缺陷；计划中未完成的任务、未解决的未知，草稿未处理且未说明原因的算缺陷。
+            2. 不可得述求的裁决：述求要求数据而账本有带来源的否定性结论（该数据不存在、公布频率或口径与述求所设不符）时，草稿如实报告该结论并给出可得口径或替代方案，即算回答到位；草稿声称不可得而账本无对应证据的，算缺陷。
+            3. 基线调整审计：附有「原始述求」且与任务述求不同（目标经调整）时，调整须有账本证据支撑且草稿说明了原因；目标较原始述求缩小而无据的，算缺陷。
+            4. 是否遵守计划中的约束。
+            5. 数据与结论是否与账本一致：账本已有而草稿遗漏、数值与账本不符、草稿声称未找到而账本已有，均算缺陷；账本中与本次述求无关的事实（如其他任务的数据）不算缺陷。
+            6. 关键事实是否附有来源。
             账本自身对同一指标、同一时期存在矛盾数值时不算草稿缺陷；草稿点出该矛盾并说明取舍更佳。
             只输出一个 JSON 对象，不要解释、不要 markdown 围栏、不要任何其它文字：
             - 通过：{"verdict":"PASS"}
@@ -37,9 +40,10 @@ final class FinalVerifier {
     /** 校验器结构化判定：pass=true 通过；pass=false 且 defects 非空则需修正。 */
     record Verdict(boolean pass, List<String> defects) {}
 
-    /** 对照述求、计划与账本检查草稿，返回结构化判定；解析失败重试一次后仍失败则放行，避免死循环。 */
-    Verdict verify(String goal, List<String> coreNeeds, String plan, String ledger, String draft) {
-        String q = buildQuery(goal, coreNeeds, plan, ledger, draft);
+    /** 对照原始述求（可空，未调整时不出现）、当前述求、计划与账本检查草稿，返回结构化判定；
+     *  解析失败重试一次后仍失败则放行，避免死循环。 */
+    Verdict verify(String original, String goal, List<String> coreNeeds, String plan, String ledger, String draft) {
+        String q = buildQuery(original, goal, coreNeeds, plan, ledger, draft);
         Verdict v = parse(quiet.call(List.of(), List.of(Msg.system(PROMPT), Msg.user(q))).text());
         if (v != null) {
             return v;
@@ -52,9 +56,13 @@ final class FinalVerifier {
         return v2 != null ? v2 : new Verdict(true, List.of());
     }
 
-    /** 组装校验对照内容：述求 + 核心述求 + 计划 + 账本 + 草稿。 */
-    private static String buildQuery(String goal, List<String> coreNeeds, String plan, String ledger, String draft) {
+    /** 组装校验对照内容：述求（经调整时附原始述求）+ 核心述求 + 计划 + 账本 + 草稿。 */
+    private static String buildQuery(String original, String goal, List<String> coreNeeds, String plan,
+                                     String ledger, String draft) {
         StringBuilder q = new StringBuilder("任务述求：\n").append(goal);
+        if (original != null && !original.isBlank() && !original.strip().equals(goal.strip())) {
+            q.append("\n\n原始述求（未经调整，供审计目标调整）：\n").append(original);
+        }
         if (coreNeeds != null && !coreNeeds.isEmpty()) {
             q.append("\n\n核心述求：\n").append(String.join("\n", coreNeeds));
         }
