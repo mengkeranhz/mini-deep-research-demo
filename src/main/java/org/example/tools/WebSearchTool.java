@@ -22,7 +22,6 @@ public class WebSearchTool implements AgentTool {
     private static final String API = "https://api.tavily.com/search";
     /** 摘要行的前缀与控制台预览中摘要正文的截短长度（字符）。 */
     private static final String ABSTRACT_PREFIX = "   摘要: ";
-    private static final int SNIPPET_WIDTH = 60;
 
     private final Config.WebSearch cfg;
 
