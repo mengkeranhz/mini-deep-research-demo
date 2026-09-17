@@ -8,11 +8,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 父子 Agent 共用的执行循环骨架：每轮注入当前时间与任务/账本快照 → 调模型 → 收集工具调用 →
- * 执行工具（每个结果一条 tool 消息）→ 提交（final_answer 或纯文本视为隐式提交）走 LLM 终止校验，
- * 未通过反馈缺陷并计数（连续 3 次且期间无实际产出即 best-effort）；超阈值压缩上下文（重建时显式保留述求/简报、
- * 进度摘要、任务与账本快照、草稿答案）。差异点（人格、日志前缀、轮次上限与横幅、缺陷反馈文案、
- * 失败后是否程序化重规划、压缩重建文案、结果组装）由子类模板方法提供。
+ * 父子 Agent 共用的执行循环骨架。
  */
 abstract class AgentLoop<T> {
     /** 上一次响应 inputTokens 超过该值即触发上下文压缩（演示时可调小）。 */
@@ -25,7 +21,6 @@ abstract class AgentLoop<T> {
     protected final LlmClient llm;
     protected final ToolRegistry registry;
     protected final FactsStore facts;
-    protected final TaskStore tasks;
     private final FinalVerifier verifier; // 无工具、非流式：提交的最终答案终止校验用
     /** 无工具、非流式：上下文压缩摘要等嵌套调用用，避免增量输出打进主循环控制台。 */
     private final LlmClient quietLlm;
@@ -34,11 +29,10 @@ abstract class AgentLoop<T> {
     private int failStreak = 0;
 
     protected AgentLoop(LlmClient llm, LlmClient quietLlm, ToolRegistry registry,
-                        FactsStore facts, TaskStore tasks, boolean streaming) {
+                        FactsStore facts, boolean streaming) {
         this.llm = llm;
         this.registry = registry;
         this.facts = facts;
-        this.tasks = tasks;
         this.verifier = new FinalVerifier(quietLlm);
         this.quietLlm = quietLlm;
         this.streaming = streaming;
@@ -58,12 +52,8 @@ abstract class AgentLoop<T> {
     /** 轮次横幅。 */
     protected abstract String roundHeader(int round);
 
-    /** 校验失败后的确定性动作：父程序化重规划；子默认无操作。 */
-    protected void replan(String baseline, String defects) {
-    }
-
     /** 校验失败反馈文案（隐式提交 / final_answer 两种口径）。 */
-    protected abstract String defectFeedback(boolean viaFinalAnswer, String defects);
+    protected abstract String defectFeedback(String defects);
 
     /** 压缩重建时「原始述求 / 简报」的标题。 */
     protected abstract String seedLabel();
@@ -92,17 +82,12 @@ abstract class AgentLoop<T> {
         for (int round = 1; round <= maxRounds(); round++) {
             System.out.println("\n" + Console.header(roundHeader(round)));
 
-            // LLM 看不到外部时钟与 TaskStore / FactsStore 外部状态 → 每轮注入当前时间并重算两个快照，
+            // LLM 看不到外部时钟与 FactsStore 外部状态 → 每轮注入当前时间并重算两个快照，
             // 作为新系统块注入（人格之后、对话之前）；只放进本次调用的副本，messages 不留旧块
-            String taskSnapshot = tasks.snapshot();
             String factsSnapshot = facts.snapshot();
             List<Msg> callMessages = new ArrayList<>(messages);
             int injectAt = 1;
             callMessages.add(injectAt++, Msg.system(CurrentTimeTool.nowText(ZoneId.systemDefault())));
-            if (taskSnapshot != null) {
-                System.out.println(Console.header("[" + tag() + "任务快照已注入] ") + tasks.progress());
-                callMessages.add(injectAt++, Msg.system(taskSnapshot));
-            }
             if (factsSnapshot != null) {
                 System.out.println(Console.header("[" + tag() + "事实账本已注入] ") + facts.size() + " 条");
                 callMessages.add(injectAt, Msg.system(factsSnapshot));
@@ -124,25 +109,20 @@ abstract class AgentLoop<T> {
             if (toolCalls.isEmpty()) {
                 // 纯文本回复不结束任务：视为隐式提交，同样走 LLM 终止校验，通过才是最终答案
                 String candidate = resp.text();
-                String baseline = tasks.goal() != null ? tasks.goal() : seed;
-                FinalVerifier.Verdict verdict = verifier.verify(tasks.original(), baseline, tasks.coreNeeds(),
-                        tasks.snapshot(), facts.snapshot(), candidate);
+                FinalVerifier.Verdict verdict = verifier.verify(seed, facts.snapshot(), candidate);
                 if (verdict.pass()) {
-                    tasks.draft(null); // 本版通过，旧草稿使命结束
                     System.out.println("[" + tag() + "最终校验] 通过");
                     return pass(candidate);
                 }
                 String defects = String.join("\n", verdict.defects());
                 System.out.println("\n[" + tag() + "最终校验] 未通过：\n" + defects);
-                tasks.draft(candidate);
                 if (++failStreak >= 3) {
                     System.out.println(Console.warn("[警告] " + tag() + "最终校验连续 " + failStreak
                             + " 次未通过，best-effort 返回当前答案"));
                     return bestEffort(candidate, defects);
                 }
-                replan(baseline, defects);
                 messages.add(Msg.assistant(resp.blocks()));
-                messages.add(Msg.user(defectFeedback(false, defects)));
+                messages.add(Msg.user(defectFeedback(defects)));
                 if (!candidate.isBlank()) {
                     lastText = candidate;
                 }
@@ -168,7 +148,6 @@ abstract class AgentLoop<T> {
             // 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传；对话稿写入结果正文（截断保数值与链接）
             // 干活是否产出实际进展的判据：本轮账本条数 / 任务完成数是否变化（空转轮两者都不动）
             int factsBefore = facts.size();
-            int doneBefore = tasks.doneCount();
             String finalAnswer = null;
             for (Block.ToolUse call : toolCalls) {
                 ToolRegistry.ToolOutput out = registry.run(call);
@@ -183,30 +162,25 @@ abstract class AgentLoop<T> {
 
             // 终止工具被调用：结果已回传，仍要做 LLM 终止校验；未通过则缺陷反馈 +（父）强制重规划
             if (finalAnswer != null) {
-                String baseline = tasks.goal() != null ? tasks.goal() : seed;
-                FinalVerifier.Verdict verdict = verifier.verify(tasks.original(), baseline, tasks.coreNeeds(),
-                        tasks.snapshot(), facts.snapshot(), finalAnswer);
+                FinalVerifier.Verdict verdict = verifier.verify(seed, facts.snapshot(), finalAnswer);
                 if (verdict.pass()) {
-                    tasks.draft(null); // 本版通过，旧草稿使命结束
                     System.out.println("[" + tag() + "最终校验] 通过");
                     return pass(finalAnswer);
                 }
                 String defects = String.join("\n", verdict.defects());
                 System.out.println("\n[" + tag() + "最终校验] 未通过：\n" + defects);
-                tasks.draft(finalAnswer);
                 // 连续 3 次校验失败且中间无干活轮次：best-effort 返回当前最优答案，避免死循环
                 if (++failStreak >= 3) {
                     System.out.println(Console.warn("[警告] " + tag() + "最终校验连续 " + failStreak
                             + " 次未通过，best-effort 返回当前答案"));
                     return bestEffort(finalAnswer, defects);
                 }
-                replan(baseline, defects);
-                messages.add(Msg.user(defectFeedback(true, defects)));
+                messages.add(Msg.user(defectFeedback(defects)));
                 continue;
             }
             // 干活轮产出实际进展（新增入账事实或新完成任务）才重置校验连败计数：
             // 换关键词空转产不出新事实，不重置——连续失败即 best-effort，避免不可得述求死循环
-            if (facts.size() > factsBefore || tasks.doneCount() > doneBefore) {
+            if (facts.size() > factsBefore) {
                 failStreak = 0;
             }
 
@@ -219,15 +193,8 @@ abstract class AgentLoop<T> {
                 System.out.println("[" + tag() + "上下文压缩] 摘要:\n" + summary);
                 // 快照压缩时现算——本轮工具调用可能刚更新过 Store，不能用轮首旧值
                 StringBuilder rebuilt = new StringBuilder(seedLabel()).append("：\n").append(seed);
-                String goal = tasks.goal();
-                if (goal != null && !goal.equals(seed)) {
-                    rebuilt.append("\n\n当前任务目标（经重新规划调整）：\n").append(goal);
-                }
                 rebuilt.append("\n\n之前的执行进度摘要：\n").append(summary);
-                appendSnapshot(rebuilt, tasks.snapshot());
                 appendSnapshot(rebuilt, facts.snapshot());
-                appendSnapshot(rebuilt, tasks.draft() == null ? null
-                        : "上一版草稿答案（未通过校验，需修正）：\n" + tasks.draft());
                 rebuilt.append("\n\n").append(resumeInstruction());
                 messages = new ArrayList<>(List.of(
                         Msg.system(persona()), Msg.user(rebuilt.toString())));
