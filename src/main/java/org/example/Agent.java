@@ -1,20 +1,20 @@
 package org.example;
 
+import org.example.tools.FinalAnswerTool;
+
 import java.util.ArrayList;
 import java.util.List;
 
 /**
  * Agent loop（对应方案 7 步）：
  * 轮次上限 → 注入任务进度与事实账本快照 → LLM（人格 + 工具元信息 + 对话与思考）→
- * 无工具调用时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
+ * 无工具纯文本或调用 final_answer 提交答案时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
  * 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本）。
  */
 public class Agent {
-    static final int MAX_ROUNDS = 120;
+    static final int MAX_ROUNDS = 90;
     /** 上一次响应 inputTokens 超过该值即触发上下文压缩（演示时可调小）。 */
     static final int CONTEXT_TOKEN_THRESHOLD = 60_000;
-    /** 最终校验未通过时最多触发的重规划次数（防死循环）。 */
-    static final int MAX_REPLANS = 3;
     /** 对话稿中每条工具结果正文的最大保留长度（足够保住数值与链接，又不让稿子膨胀）。 */
     static final int TRANSCRIPT_TOOL_BODY_LIMIT = 1_500;
 
@@ -50,7 +50,6 @@ public class Agent {
         messages.add(Msg.user(request));
         // 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）
         StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
-        int replans = 0; // 最终校验未通过触发的重规划次数
         String bestAnswer = null; // 当前最完整的交付草稿：校验/压缩围绕它，最终返回的是完整答案而非补丁
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
@@ -97,47 +96,12 @@ public class Agent {
                 if (!candidate.isBlank()) {
                     bestAnswer = candidate; // 每次无工具响应的全文都视为最新完整草稿
                 }
-                // 最终回答前硬闸门：有校验依据（固定基线约束和/或事实账本）且未超重规划上限时先校验。
-                // 校验依据用固定基线（原始约束），不用会随重规划变化的 live 快照；事实账本让校验器
-                // 能做「结论 ↔ 过程」交叉核对——草稿说未找到而账本里有的矛盾在此拦截
-                String criteria = tasks.baseline();
-                String ledger = facts.ledger();
-                if ((criteria != null || ledger != null) && replans < MAX_REPLANS) {
-                    String basis = criteria == null ? "" : criteria;
-                    if (ledger != null) {
-                        basis = basis + (basis.isEmpty() ? "" : "\n\n") + ledger;
-                    }
-                    String verdict = verify(candidate, basis);
-                    if (!verdict.strip().toUpperCase().startsWith("PASS")) {
-                        System.out.println("\n[最终校验] 未通过，触发重规划：\n" + verdict);
-                        messages.add(Msg.assistant(resp.blocks()));
-                        messages.add(Msg.user("你的回答未通过最终校验，存在以下缺陷：\n" + verdict
-                                + "\n\n请先调用 analyze_query 重新规划（新增的检索目标写入 required_facts），"
-                                + "补齐缺陷后【重新输出完整的最终回答】——不要只输出补丁或缺失部分，"
-                                + "必须覆盖问题要求的全部维度与时期；新检索到的数据先 record_facts 入账再作答，"
-                                + "答案数据一律以事实账本为准。"));
-                        transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
-                        replans++;
-                        continue;
-                    }
-                    System.out.println("[最终校验] 通过");
-                    // 覆盖度硬闸门：声明的覆盖目标还有格子没入账，或 not_found 声明没写检索方式，
-                    // 不放行——防止「5/5 任务完成」的假象掩盖数据缺口（如某年季度数据根本没查）
-                    String gaps = facts.gateReport();
-                    if (gaps != null) {
-                        System.out.println("\n[覆盖度闸门] 未通过：\n" + gaps);
-                        messages.add(Msg.assistant(resp.blocks()));
-                        messages.add(Msg.user("最终回答前检查发现以下数据覆盖缺口：\n" + gaps
-                                + "\n\n请逐项处理后再【重新输出完整的最终回答】：\n"
-                                + "1. 继续检索（换关键词、换统计口径、换来源）并用 record_facts 入账；\n"
-                                + "2. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
-                                + "3. 确认检索不到的，用 record_facts 声明 status=not_found，"
-                                + "note 写明已尝试的检索关键词与来源，并在最终答案中如实说明该缺口。"));
-                        transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
-                        replans++;
-                        continue;
-                    }
-                    System.out.println("[覆盖度闸门] 通过");
+                String defects = finalGate(candidate);
+                if (defects != null) {
+                    messages.add(Msg.assistant(resp.blocks()));
+                    messages.add(Msg.user(defects));
+                    transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
+                    continue;
                 }
                 return candidate; // 无工具调用 → 结束返回结论
             }
@@ -157,6 +121,25 @@ public class Agent {
             // 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传。
             // 对话稿写入结果正文（截断保数值与链接）：压缩摘要才有数据可保，不再只记「已回传 N 个」
             for (Block.ToolUse call : toolCalls) {
+                // final_answer 终止闸门：提交的答案先过与纯文本终答同一套校验（VERIFY_PROMPT + 覆盖度），
+                // 通过才真正结束任务；未通过则缺陷清单作为 error 结果回传，模型修正后重新提交
+                if (FinalAnswerTool.NAME.equals(call.name())) {
+                    String answer = ToolRegistry.optStr(call.input(), "answer");
+                    if (answer != null && !answer.isBlank()) {
+                        bestAnswer = answer; // 工具提交的全文同样视为最新完整草稿
+                        String defects = finalGate(answer);
+                        if (defects == null) {
+                            System.out.println("[final_answer] 校验通过，任务完成");
+                            messages.add(Msg.tool(new Block.ToolResult(call.id(),
+                                    "最终校验通过，答案已采纳，任务完成。", false)));
+                            return answer;
+                        }
+                        messages.add(Msg.tool(new Block.ToolResult(call.id(), defects, true)));
+                        transcript.append("  [final_answer 未通过最终校验，缺陷清单已回传]\n");
+                        continue; // 同批其余工具调用照常执行
+                    }
+                    // answer 缺失或为空 → 走正常执行路径，由 registry 返回缺参错误
+                }
                 ToolRegistry.ToolOutput out = registry.run(call);
                 // analyze_query 的规划 JSON 与 record_facts 的回执（含覆盖度）完整可见；其余按预览截断
                 boolean full = "analyze_query".equals(call.name()) || "record_facts".equals(call.name());
@@ -214,6 +197,49 @@ public class Agent {
         return quietLlm.call(List.of(),
                 List.of(Msg.system(VERIFY_PROMPT),
                         Msg.user("校验依据：\n" + criteria + "\n\n草稿回答：\n" + draft))).text();
+    }
+
+    /**
+     * 终答硬闸门（纯文本回答与 final_answer 提交共用）：VERIFY_PROMPT 约束校验 + 账本核对 + 覆盖度检查。
+     * 无校验依据（未规划且未入账）时不拦；返回 null 表示通过放行，否则返回需回传模型的
+     * 缺陷清单（含补救指引），模型补齐缺陷后重新提交完整答案。
+     * 校验依据用固定基线（原始约束），不用会随重规划变化的 live 快照；事实账本让校验器
+     * 能做「结论 ↔ 过程」交叉核对——草稿说未找到而账本里有的矛盾在此拦截。
+     */
+    private String finalGate(String draft) {
+        String criteria = tasks.baseline();
+        String ledger = facts.ledger();
+        if (criteria == null && ledger == null) {
+            return null;
+        }
+        String basis = criteria == null ? "" : criteria;
+        if (ledger != null) {
+            basis = basis + (basis.isEmpty() ? "" : "\n\n") + ledger;
+        }
+        String verdict = verify(draft, basis);
+        if (!verdict.strip().toUpperCase().startsWith("PASS")) {
+            System.out.println("\n[最终校验] 未通过：\n" + verdict);
+            return "回答未通过最终校验，存在以下缺陷：\n" + verdict
+                    + "\n\n请先调用 analyze_query 重新规划（新增的检索目标写入 required_facts），"
+                    + "补齐缺陷后重新提交【完整的最终回答】——不要只输出补丁或缺失部分，"
+                    + "必须覆盖问题要求的全部维度与时期；新检索到的数据先 record_facts 入账再作答，"
+                    + "答案数据一律以事实账本为准。";
+        }
+        System.out.println("[最终校验] 通过");
+        // 覆盖度硬闸门：声明的覆盖目标还有格子没入账，或 not_found 声明没写检索方式，
+        // 不放行——防止「5/5 任务完成」的假象掩盖数据缺口（如某年季度数据根本没查）
+        String gaps = facts.gateReport();
+        if (gaps != null) {
+            System.out.println("\n[覆盖度闸门] 未通过：\n" + gaps);
+            return "最终回答前检查发现以下数据覆盖缺口：\n" + gaps
+                    + "\n\n请逐项处理后再重新提交【完整的最终回答】：\n"
+                    + "1. 继续检索（换关键词、换统计口径、换来源）并用 record_facts 入账；\n"
+                    + "2. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
+                    + "3. 确认检索不到的，用 record_facts 声明 status=not_found，"
+                    + "note 写明已尝试的检索关键词与来源，并在最终答案中如实说明该缺口。";
+        }
+        System.out.println("[覆盖度闸门] 通过");
+        return null;
     }
 
     /** 控制台预览工具结果前 200 字符。 */

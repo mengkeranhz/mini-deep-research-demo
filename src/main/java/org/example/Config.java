@@ -50,10 +50,10 @@ public final class Config {
                         boolVal(llm, "streaming", true)),
                 new WebSearch(
                         str(webSearch, "tavily-api-key"),
-                        intVal(webSearch, "max-results", 5)),
+                        intVal(webSearch, "max-results", 30)),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
                 new Storage(str(storage, "root-dir")),
-                new ReadFile(intVal(readFile, "max-results", 5)));
+                new ReadFile(intVal(readFile, "max-results", 30)));
     }
 
     /** 文件根目录解析：显式配置 root-dir → 工作目录(user.dir) → 项目目录(code source 所在)。 */

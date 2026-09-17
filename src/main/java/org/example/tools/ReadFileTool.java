@@ -44,7 +44,9 @@ public class ReadFileTool implements AgentTool {
                                 "limit", Map.of("type", "integer", "description", "返回行数，默认 200"),
                                 "keywords", Map.of("type", "array",
                                         "items", Map.of("type", "string"),
-                                        "description", "关键词列表，返回命中这些关键词的完整段落（命中关键词更多的段落优先）")),
+                                        "description", "关键词列表，返回命中这些关键词的完整段落（命中关键词更多的段落优先）"),
+                                "max_results", Map.of("type", "integer",
+                                        "description", "关键词检索模式返回的段落数上限，默认 30；确认命中很多只需概览时可调小")),
                         "required", List.of("path")));
     }
 
@@ -57,7 +59,8 @@ public class ReadFileTool implements AgentTool {
                 ? ToolRegistry.strList(input, "keywords").stream().filter(k -> !k.isBlank()).toList()
                 : List.of();
         if (!keywords.isEmpty()) {
-            return searchByKeywords(path, lines, keywords, maxResults);
+            int max = clamp(ToolRegistry.optInt(input, "max_results", maxResults));
+            return searchByKeywords(path, lines, keywords, max);
         }
 
         int offset = ToolRegistry.optInt(input, "offset", 0);
@@ -120,6 +123,11 @@ public class ReadFileTool implements AgentTool {
 
     /** 一个命中段落：起始行、结束行、文本与命中的不同关键词数。 */
     private record Hit(int start, int end, String text, int keywordCount) {}
+
+    /** 段落数钳制到 [1, 50]：LLM 传参异常时不打爆上下文。 */
+    private static int clamp(int v) {
+        return Math.max(1, Math.min(50, v));
+    }
 
     /** 相对路径相对于根目录解析，绝对路径原样使用。 */
     private Path resolve(String path) {

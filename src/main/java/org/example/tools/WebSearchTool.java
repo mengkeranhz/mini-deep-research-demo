@@ -12,7 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
-/** web_search：Tavily 搜索 API（key 与 max-results 来自 config.yaml 的 tools.web-search）。 */
+/** web_search：Tavily 搜索 API。key 来自 config.yaml 的 tools.web-search；
+ * 返回条数可由 LLM 传 max_results 指定，不传用 config 的 max-results（默认 30）。 */
 public class WebSearchTool implements AgentTool {
 
     private static final ObjectMapper M = new ObjectMapper();
@@ -36,7 +37,9 @@ public class WebSearchTool implements AgentTool {
                         "properties", Map.of("keywords", Map.of(
                                 "type", "array",
                                 "items", Map.of("type", "string"),
-                                "description", "搜索关键词，中英文均可")),
+                                "description", "搜索关键词，中英文均可"),
+                                "max_results", Map.of("type", "integer",
+                                        "description", "返回结果条数上限，默认 30；只需快速摸底时可传更小值（如 5）节省上下文")),
                         "required", List.of("keywords")));
     }
 
@@ -46,8 +49,9 @@ public class WebSearchTool implements AgentTool {
             throw new IllegalStateException("未配置 tavily-api-key（config.yaml 的 tools.web-search，对应环境变量 TAVILY_API_KEY）");
         }
         String query = String.join(" ", ToolRegistry.strList(input, "keywords"));
+        int max = clamp(ToolRegistry.optInt(input, "max_results", cfg.maxResults()));
         ObjectNode body = M.createObjectNode();
-        body.put("query", query).put("max_results", cfg.maxResults());
+        body.put("query", query).put("max_results", max);
 
         Http.Response resp = Http.post(API, Map.of("Authorization", "Bearer " + cfg.tavilyApiKey()),
                 M.writeValueAsString(body));
@@ -65,5 +69,10 @@ public class WebSearchTool implements AgentTool {
         return n == 0
                 ? "未搜到结果，建议更换关键词"
                 : "搜索「" + query + "」得到 " + n + " 条结果:\n" + sb;
+    }
+
+    /** 条数钳制到 [1, 50]：LLM 传参异常时不打爆请求与上下文。 */
+    private static int clamp(int v) {
+        return Math.max(1, Math.min(50, v));
     }
 }

@@ -137,6 +137,8 @@ public class AnalyzeQueryTool implements AgentTool {
         }
         return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
                 + "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
+                + "首次 web_search 之前先调用 locate_sources 定位本主题的权威来源域名，"
+                + "之后 web_search 优先带 domains 限定到这些域名（限定无结果再去掉 domains 开放检索），"
                 + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径），"
                 + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。";
     }

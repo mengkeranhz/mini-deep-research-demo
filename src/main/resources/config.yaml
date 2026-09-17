@@ -3,7 +3,7 @@ llm:
   base-url: https://open.bigmodel.cn/api/anthropic
   model: glm-5.3
   api-key: "${LLM_API_KEY}"
-  max-tokens: 8192
+  max-tokens: 16384
   temperature: 0
   streaming: true
 
@@ -15,11 +15,7 @@ storage:
 tools:
   web-search:
     tavily-api-key: "${TAVILY_API_KEY}"
-    max-results: 5
   lbs-service:
     amap-api-key: "${AMAP_API_KEY}"
     # 相邻两次高德请求的最小间隔（毫秒），防 QPS 超限；个人 key 约 3 QPS → 350ms
     min-request-interval-ms: 350
-  read-file:
-    # 关键词检索默认返回的段落数
-    max-results: 5
