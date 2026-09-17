@@ -25,6 +25,7 @@ public final class SystemPrompt {
             # 输出要求
             - 关键事实、数据和结论必须给出真实可点击的来源链接，引用与对应陈述紧邻，严格遵循markdown语法。
             - 无法核实、来源不足或存在冲突时明确说明，不编造。
+            - 按论点组织内容，不简单按来源或时间罗列。
             """;
 
     private SystemPrompt() {
