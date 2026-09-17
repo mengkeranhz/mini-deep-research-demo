@@ -39,7 +39,7 @@ public class RecordFactsTool implements AgentTool {
                                                         "source", Map.of("type", "string",
                                                                 "description", "来源链接或来源名"),
                                                         "note", Map.of("type", "string",
-                                                                "description", "补充说明，可选"),
+                                                                "description", "补充说明，如证据等级等，可选"),
                                                         "remove", Map.of("type", "boolean",
                                                                 "description", "true 表示从账本删除 fact 文本匹配的既有事实（用于纠正错误入账），默认 false")),
                                                 "required", List.of("fact")))),
