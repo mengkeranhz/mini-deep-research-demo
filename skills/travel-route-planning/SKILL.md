@@ -33,7 +33,7 @@ description: 旅游路线规划。适用于「规划旅游路线 / 自驾行程 
 
 ## 第四步：约束校验（任一不通过 → 调整行程 → 复查受影响路段，直到全部通过）
 
-8. 判定方法、计算口径与不通过时的调整策略见 reference/constraint-checks.md（用 load_skill 按需读取）。
+8. 判定方法、计算口径与不通过时的调整策略见 reference/constraint-checks.md（用 read_file 按需读取）。
 9. 任一校验不通过：按 reference/constraint-checks.md 的调整策略修改行程，用 route_query 复查受影响路段后重新校验。
 
 ## 输出要求
