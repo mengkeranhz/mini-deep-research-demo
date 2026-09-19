@@ -35,6 +35,11 @@ public final class SystemPrompt {
             - 不输出无来源支撑的确定性结论。
             """;
 
+    /** 实际发送的系统提示词：人格 + 尾部的可用技能清单（name/description）。 */
+    public static String withSkills() {
+        return PERSONA + SkillRegistry.promptSection();
+    }
+
     private SystemPrompt() {
     }
 }

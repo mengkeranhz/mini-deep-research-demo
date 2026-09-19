@@ -46,7 +46,7 @@ public class Agent {
 
     public String run(String request) {
         List<Msg> messages = new ArrayList<>();
-        messages.add(Msg.system(SystemPrompt.PERSONA));
+        messages.add(Msg.system(SystemPrompt.withSkills()));
         messages.add(Msg.user(request));
         // 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）
         StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
@@ -174,7 +174,7 @@ public class Agent {
                 }
                 rebuilt.append("\n\n请基于以上进度继续完成任务；后续作答数据一律以事实账本为准。");
                 messages = new ArrayList<>(List.of(
-                        Msg.system(SystemPrompt.PERSONA), Msg.user(rebuilt.toString())));
+                        Msg.system(SystemPrompt.withSkills()), Msg.user(rebuilt.toString())));
                 transcript = new StringBuilder("用户: ").append(rebuilt).append('\n');
             }
         }
