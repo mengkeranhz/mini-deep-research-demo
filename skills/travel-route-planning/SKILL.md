@@ -36,8 +36,6 @@ description: 旅游路线规划。适用于「规划旅游路线 / 自驾行程 
 8. 判定方法、计算口径与不通过时的调整策略见 reference/constraint-checks.md（用 load_skill 按需读取）。
 9. 任一校验不通过：按 reference/constraint-checks.md 的调整策略修改行程，用 route_query 复查受影响路段后重新校验。
 
-
-
 ## 输出要求
 
 - 行程按天呈现（尽量以表格形式编排）：每日的驾驶段（起终点、里程、时长）、游览点、用餐/加油/休息安排、住宿。
