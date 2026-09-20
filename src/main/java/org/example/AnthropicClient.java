@@ -64,7 +64,7 @@ final class AnthropicClient implements LlmClient {
                     .header("content-type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(M.writeValueAsString(body)))
                     .build();
-            return cfg.streaming() ? stream(req) : blocking(req);
+            return HttpRetry.retry(() -> cfg.streaming() ? stream(req) : blocking(req));
         } catch (Exception e) {
             throw new RuntimeException("Anthropic 调用失败: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
@@ -75,7 +75,7 @@ final class AnthropicClient implements LlmClient {
     private LlmResponse blocking(HttpRequest req) throws Exception {
         HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200) {
-            throw new IllegalStateException("HTTP " + resp.statusCode() + ": " + resp.body());
+            throw new HttpRetry.HttpError(resp.statusCode(), resp.body());
         }
         JsonNode root = parse(resp.body());
         List<Block> blocks = new ArrayList<>();
@@ -92,7 +92,7 @@ final class AnthropicClient implements LlmClient {
         HttpResponse<Stream<String>> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofLines());
         if (resp.statusCode() != 200) {
             String err = resp.body().collect(Collectors.joining("\n"));
-            throw new IllegalStateException("HTTP " + resp.statusCode() + ": " + err);
+            throw new HttpRetry.HttpError(resp.statusCode(), err);
         }
         List<Block> blocks = new ArrayList<>();
         Map<Integer, ObjectNode> open = new HashMap<>(); // index → 累积中的 content block

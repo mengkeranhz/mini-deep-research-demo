@@ -66,7 +66,7 @@ final class OpenAiClient implements LlmClient {
                     .header("content-type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(M.writeValueAsString(body)))
                     .build();
-            return cfg.streaming() ? stream(req) : blocking(req);
+            return HttpRetry.retry(() -> cfg.streaming() ? stream(req) : blocking(req));
         } catch (Exception e) {
             throw new RuntimeException("OpenAI 调用失败: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
@@ -77,7 +77,7 @@ final class OpenAiClient implements LlmClient {
     private LlmResponse blocking(HttpRequest req) throws Exception {
         HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200) {
-            throw new IllegalStateException("HTTP " + resp.statusCode() + ": " + resp.body());
+            throw new HttpRetry.HttpError(resp.statusCode(), resp.body());
         }
         JsonNode root = AnthropicClient.parse(resp.body());
         JsonNode message = root.path("choices").path(0).path("message");
@@ -93,7 +93,7 @@ final class OpenAiClient implements LlmClient {
         HttpResponse<Stream<String>> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofLines());
         if (resp.statusCode() != 200) {
             String err = resp.body().collect(Collectors.joining("\n"));
-            throw new IllegalStateException("HTTP " + resp.statusCode() + ": " + err);
+            throw new HttpRetry.HttpError(resp.statusCode(), err);
         }
         StringBuilder thinking = new StringBuilder();
         StringBuilder text = new StringBuilder();
