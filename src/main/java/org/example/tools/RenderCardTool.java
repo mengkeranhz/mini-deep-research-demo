@@ -46,7 +46,7 @@ public class RenderCardTool implements AgentTool {
     public ToolDef definition() {
         return new ToolDef(name(), "把 Markdown 渲染成精美的知识卡片 PNG 图片（调用 md2card API，消耗积分，需联网；"
                         + "服务端超时 60s，首次调用可能较慢）。"
-                        + "markdown 中的图片只用可外链的开放图源（unsplash/pixabay 等直链，unsplash 已实测可渲染）；"
+                        + "markdown 中的图片只用可外链的开放图源（unsplash、高德 POI 图 store.is.autonavi.com 均已实测可渲染，pixabay 等开放直链亦可）；"
                         + "pngtree/alamy/shutterstock 等图库站直链会被防盗链拦截，渲染服务端抓不到图会静默丢失"
                         + "（不报错、不留占位），一律不用。"
                         + "常用主题：xiaohongshu（小红书风，旅行/探店）、apple-notes（通用笔记）、"
