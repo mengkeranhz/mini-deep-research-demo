@@ -8,7 +8,7 @@ import java.util.List;
 /**
  * Agent loop（对应方案 7 步）：
  * 轮次上限 → 注入任务进度与事实账本快照 → LLM（人格 + 工具元信息 + 对话与思考）→
- * 无工具纯文本或调用 final_answer 提交答案时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
+ * 无工具纯文本直接作为本次结论返回（不触发校验）；调用 final_answer 提交答案时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
  * 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本）。
  */
 public class Agent {
@@ -94,18 +94,11 @@ public class Agent {
                 }
             }
             if (toolCalls.isEmpty()) {
-                String candidate = resp.text();
-                if (!candidate.isBlank()) {
-                    bestAnswer = candidate; // 每次无工具响应的全文都视为最新完整草稿
-                }
-                String defects = finalGate(candidate);
-                if (defects != null) {
-                    messages.add(Msg.assistant(resp.blocks()));
-                    messages.add(Msg.user(defects));
-                    transcript.append("助手: ").append(candidate.isEmpty() ? "（草稿回答）" : candidate).append('\n');
-                    continue;
-                }
-                return candidate; // 无工具调用 → 结束返回结论
+                // 无工具纯文本 = 对用户的直接陈述（澄清提问或最终结论），原样返回、不走终答闸门——
+                // 中途提问（如技能第一步的集中澄清）曾被校验当「不合格答案」打回，陷入缺陷回传循环。
+                // 终答质量闸门只在 final_answer 提交路径上生效
+                transcript.append("助手: ").append(resp.text()).append('\n');
+                return resp.text();
             }
             for (Block.ToolUse u : toolCalls) {
                 System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));
