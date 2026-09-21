@@ -43,6 +43,19 @@ public class FactsStore {
         return !f.equals(old);
     }
 
+    /**
+     * 入账回执提示用：该 dimension 是否未声明目标（视为额外补充，不提示），
+     * 或已声明目标且 period 在其目标时期列表内（命中）；命中/未声明返回 true，
+     * dimension 已有目标而 period 不在其中返回 false——典型的标签错位。
+     */
+    public boolean hitsTarget(String dimension, String period) {
+        if (dimension == null || period == null) {
+            return true;
+        }
+        List<String> ps = targets.get(dimension.strip());
+        return ps == null || ps.contains(period.strip());
+    }
+
     public boolean isEmpty() {
         return facts.isEmpty() && targets.isEmpty();
     }

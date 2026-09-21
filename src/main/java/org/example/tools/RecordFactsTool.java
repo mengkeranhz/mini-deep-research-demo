@@ -67,6 +67,7 @@ public class RecordFactsTool implements AgentTool {
             return "参数 facts 必须是非空数组，每项含 dimension、period、status（可选 metric/value/source/note）";
         }
         List<String> rejected = new ArrayList<>();
+        List<String> offTarget = new ArrayList<>();
         int accepted = 0;
         for (JsonNode n : arr) {
             String dimension = ToolRegistry.optStr(n, "dimension");
@@ -91,10 +92,19 @@ public class RecordFactsTool implements AgentTool {
                     orEmpty(ToolRegistry.optStr(n, "source")),
                     status, orEmpty(note)));
             accepted++;
+            if (!facts.hitsTarget(dimension, period)) {
+                offTarget.add(dimension + "@" + period);
+            }
         }
         StringBuilder sb = new StringBuilder("已入账 ").append(accepted).append(" 条");
         if (!rejected.isEmpty()) {
             sb.append("；被拒绝 ").append(rejected.size()).append(" 条:\n").append(String.join("\n", rejected));
+        }
+        if (!offTarget.isEmpty()) {
+            sb.append("\n注意: ").append(offTarget.size())
+                    .append(" 条的 dimension 已有覆盖目标、但 period 不在目标时期内（")
+                    .append(String.join("、", offTarget))
+                    .append("）——若这正是目标数据，请照抄覆盖目标的 period 字符串重新入账（同 key 覆盖旧值），否则终答覆盖闸门将报缺口");
         }
         return sb.append('\n').append(facts.coverageLine()).toString();
     }
