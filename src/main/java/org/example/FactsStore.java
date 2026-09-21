@@ -23,6 +23,9 @@ public class FactsStore {
     /** 已入账事实：key = dimension|period|metric，同 key 重复入账覆盖旧值。 */
     private final Map<String, Fact> facts = new LinkedHashMap<>();
 
+    /** 覆盖目标中尚无事实入账的一个格子（维度×时期），闸门报缺口的最小单位。 */
+    private record Cell(String dimension, String period) {}
+
     /** 声明（或追加）某维度需覆盖的时期；空白与重复时期忽略。 */
     public void require(String dimension, List<String> periods) {
         if (dimension == null || dimension.isBlank()) {
@@ -54,6 +57,28 @@ public class FactsStore {
         }
         List<String> ps = targets.get(dimension.strip());
         return ps == null || ps.contains(period.strip());
+    }
+
+    /**
+     * 入账回执提示用：与 dimension 不精确相等（含首尾空白差异）但归一化后近似
+     * （去空白/大小写/分隔符后同名，或单边包含）的已声明目标，最多 2 个——
+     * 与 period 错位提示对称：疑似 dimension 标签错位，提示照抄目标字符串重录。
+     */
+    public List<String> nearTargets(String dimension) {
+        if (dimension == null || dimension.isBlank() || targets.isEmpty()) {
+            return List.of();
+        }
+        List<String> near = new ArrayList<>();
+        String dim = dimension.strip();
+        for (String t : targets.keySet()) {
+            if (!t.equals(dim) && nearDim(t, dimension) && !near.contains(t)) {
+                near.add(t);
+                if (near.size() >= 2) {
+                    break;
+                }
+            }
+        }
+        return near;
     }
 
     public boolean isEmpty() {
@@ -124,11 +149,20 @@ public class FactsStore {
     /**
      * 终答硬闸门：返回缺口清单（null 表示通过，无目标或有目标且全覆盖均算通过）。
      * 缺口两类：覆盖目标要求但账本无任何记录的时期；not_found 声明未写明检索方式（放弃过早）。
+     * 缺口格若存在 dimension/period 近似的已入账条目，点名提示标签错位——
+     * 防止（尤其压缩后）把「标签写歪」误读为「没查到」而反复重查。
      */
     public String gateReport() {
         List<String> gaps = new ArrayList<>();
-        for (String m : missingPeriods()) {
-            gaps.add(m + "：覆盖目标要求但账本中无任何记录");
+        for (Cell c : missingCells()) {
+            String gap = c.dimension() + "@" + c.period() + "：覆盖目标要求但账本中无任何记录";
+            List<String> suspects = suspectsFor(c);
+            if (!suspects.isEmpty()) {
+                gap += "；账本中已有疑似条目（标签错位）: " + String.join("、", suspects)
+                        + "——若即此数据，照抄覆盖目标的 dimension 与 period 字符串重新入账"
+                        + "（同 key 覆盖旧值），不必重新检索";
+            }
+            gaps.add(gap);
         }
         for (Fact f : facts.values()) {
             if ("not_found".equals(f.status()) && f.note().isBlank()) {
@@ -152,17 +186,71 @@ public class FactsStore {
 
     /** 覆盖目标中尚无任何事实入账的「维度@时期」列表。 */
     private List<String> missingPeriods() {
-        List<String> missing = new ArrayList<>();
+        return missingCells().stream().map(c -> c.dimension() + "@" + c.period()).toList();
+    }
+
+    /** 覆盖目标中尚无任何事实入账的格子（判定与 hitsTarget 同口径的精确匹配）。 */
+    private List<Cell> missingCells() {
+        List<Cell> missing = new ArrayList<>();
         for (Map.Entry<String, List<String>> e : targets.entrySet()) {
             for (String p : e.getValue()) {
                 boolean hit = facts.values().stream()
                         .anyMatch(f -> e.getKey().equals(f.dimension()) && p.equals(f.period()));
                 if (!hit) {
-                    missing.add(e.getKey() + "@" + p);
+                    missing.add(new Cell(e.getKey(), p));
                 }
             }
         }
         return missing;
+    }
+
+    /** 缺口格的疑似已入账条目（dimension 近似即可，含 period 错位的同维度条目），最多 2 条。 */
+    private List<String> suspectsFor(Cell c) {
+        List<String> suspects = new ArrayList<>();
+        for (Fact f : facts.values()) {
+            if (nearDim(c.dimension(), f.dimension())) {
+                String s = "[" + f.dimension() + "@" + f.period() + "]";
+                if (!suspects.contains(s)) {
+                    suspects.add(s);
+                }
+                if (suspects.size() >= 2) {
+                    break;
+                }
+            }
+        }
+        return suspects;
+    }
+
+    /**
+     * 维度近似判定：去首尾空白相等（覆盖空白变体）、去空白/大小写/分隔符后同名
+     * （「故宫-成人门票」「故宫成人门票」「故宫·成人门票」视为同名）、或归一化后单边包含
+     * （「成人门票」⊂「故宫-成人门票」）。包含要求短边 ≥2 字，防单字误报。
+     * 不覆盖同义改写（票价↔门票）——那类靠提示词与闸门点名兜底。
+     */
+    private static boolean nearDim(String target, String candidate) {
+        String a = target == null ? "" : target.strip();
+        String b = candidate == null ? "" : candidate.strip();
+        if (a.equals(b)) {
+            return true;
+        }
+        if (normLoose(a).equals(normLoose(b))) {
+            return true;
+        }
+        String na = norm(a);
+        String nb = norm(b);
+        String shorter = na.length() <= nb.length() ? na : nb;
+        String longer = shorter == na ? nb : na;
+        return shorter.length() >= 2 && longer.contains(shorter);
+    }
+
+    /** 归一基形：去所有空白（含全角空格）、转小写——「GDP 增速」与「gdp增速」同名。 */
+    private static String norm(String s) {
+        return s.replaceAll("\\s+", "").toLowerCase();
+    }
+
+    /** 宽松基形：再去常见分隔符——连字符/箭头/斜杠/冒号/顿号等中英文变体。 */
+    private static String normLoose(String s) {
+        return norm(s).replaceAll("[-—–_·>/→|｜,，、:：;；]+", "");
     }
 
     private String counts() {

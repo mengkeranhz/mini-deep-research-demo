@@ -68,6 +68,7 @@ public class RecordFactsTool implements AgentTool {
         }
         List<String> rejected = new ArrayList<>();
         List<String> offTarget = new ArrayList<>();
+        List<String> offDimension = new ArrayList<>();
         int accepted = 0;
         for (JsonNode n : arr) {
             String dimension = ToolRegistry.optStr(n, "dimension");
@@ -92,8 +93,14 @@ public class RecordFactsTool implements AgentTool {
                     orEmpty(ToolRegistry.optStr(n, "source")),
                     status, orEmpty(note)));
             accepted++;
+            // 两类标签错位提示互斥：dimension 精确命中才校验 period；未命中则查近似目标（对称提示）
             if (!facts.hitsTarget(dimension, period)) {
                 offTarget.add(dimension + "@" + period);
+            } else {
+                List<String> near = facts.nearTargets(dimension);
+                if (!near.isEmpty()) {
+                    offDimension.add(dimension + "（疑似应为 " + String.join("、", near) + "）");
+                }
             }
         }
         StringBuilder sb = new StringBuilder("已入账 ").append(accepted).append(" 条");
@@ -105,6 +112,12 @@ public class RecordFactsTool implements AgentTool {
                     .append(" 条的 dimension 已有覆盖目标、但 period 不在目标时期内（")
                     .append(String.join("、", offTarget))
                     .append("）——若这正是目标数据，请照抄覆盖目标的 period 字符串重新入账（同 key 覆盖旧值），否则终答覆盖闸门将报缺口");
+        }
+        if (!offDimension.isEmpty()) {
+            sb.append("\n注意: ").append(offDimension.size())
+                    .append(" 条的 dimension 未精确命中覆盖目标、但与其近似（")
+                    .append(String.join("、", offDimension))
+                    .append("）——若这正是目标数据，请照抄覆盖目标的 dimension 字符串重新入账（同 key 覆盖旧值），否则终答覆盖闸门将报缺口");
         }
         return sb.append('\n').append(facts.coverageLine()).toString();
     }
