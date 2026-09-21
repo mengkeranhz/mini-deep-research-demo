@@ -33,6 +33,7 @@ public class Agent {
     private final ToolRegistry registry;
     private final TaskStore tasks;
     private final FactsStore facts;
+    private final SkillState skillState;
 
     public Agent() {
         this.cfg = Config.load();
@@ -41,7 +42,8 @@ public class Agent {
                 cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
         this.tasks = new TaskStore();
         this.facts = new FactsStore();
-        this.registry = new ToolRegistry(cfg, tasks, facts);
+        this.skillState = new SkillState(); // 会话级生效技能：load_skill 写入，规划注入与压缩重建读取
+        this.registry = new ToolRegistry(cfg, tasks, facts, skillState);
     }
 
     public String run(String request) {
@@ -141,8 +143,10 @@ public class Agent {
                     // answer 缺失或为空 → 走正常执行路径，由 registry 返回缺参错误
                 }
                 ToolRegistry.ToolOutput out = registry.run(call);
-                // analyze_query 的规划 JSON 与 record_facts 的回执（含覆盖度）完整可见；其余按预览截断
-                boolean full = "analyze_query".equals(call.name()) || "record_facts".equals(call.name());
+                // analyze_query 的规划 JSON 与 record_facts 的回执（含覆盖度）完整可见；
+                // load_skill 全文入稿——摘要才能看清流程走到哪一步（正文重注入靠 SkillState，这里只为摘要保真）
+                boolean full = "analyze_query".equals(call.name()) || "record_facts".equals(call.name())
+                        || "load_skill".equals(call.name());
                 String printed = full ? out.content() : preview(out.content());
                 System.out.println("[工具结果] " + printed);
                 messages.add(Msg.tool(new Block.ToolResult(call.id(), out.content(), out.isError())));
@@ -162,6 +166,14 @@ public class Agent {
                 // 防止压缩后被陈旧草稿锚定（草稿只在无工具轮更新，连续检索期它必然落后于账本）
                 StringBuilder rebuilt = new StringBuilder("原始任务述求：\n").append(request)
                         .append("\n\n之前的执行进度摘要：\n").append(summary);
+                // 已加载技能正文确定性重注入（重水化）：压缩重建的白名单只含技能 name/description，
+                // 正文不补回则技能在压缩后失忆——技能是流程状态，不是聊天记录
+                Skill activeSkill = skillState.get();
+                if (activeSkill != null) {
+                    rebuilt.append("\n\n【已加载技能：").append(activeSkill.name())
+                            .append("，本次任务按其完整工作流程继续严格执行】\n")
+                            .append(activeSkill.instructions());
+                }
                 String ledger = facts.ledger();
                 if (ledger != null) {
                     rebuilt.append("\n\n【事实账本：已检索入账的结构化数据，最终权威依据】\n")

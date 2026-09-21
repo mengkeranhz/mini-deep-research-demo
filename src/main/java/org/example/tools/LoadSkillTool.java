@@ -3,6 +3,7 @@ package org.example.tools;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.example.Skill;
 import org.example.SkillRegistry;
+import org.example.SkillState;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
@@ -12,6 +13,12 @@ import java.util.Map;
 
 /** load_skill：按名称加载技能的完整工作流程（系统提示词只带 name/description，此处取全文）。 */
 public class LoadSkillTool implements AgentTool {
+
+    private final SkillState skills;
+
+    public LoadSkillTool(SkillState skills) {
+        this.skills = skills;
+    }
 
     @Override
     public String name() {
@@ -35,6 +42,8 @@ public class LoadSkillTool implements AgentTool {
         Skill skill = SkillRegistry.find(name)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "未知技能: " + name + "，可用技能: " + String.join("、", SkillRegistry.names())));
+        // 记为会话级生效技能：analyze_query 规划时据此把技能正文注入规划上下文
+        skills.set(skill);
         StringBuilder out = new StringBuilder(skill.instructions());
         if (!skill.files().isEmpty()) {
             out.append("\n\n本技能附带的文件（不必全部读取，需要时用 read_file 按需读取，路径相对根目录）：\n");
@@ -43,7 +52,8 @@ public class LoadSkillTool implements AgentTool {
             }
         }
         out.append("\n技能 ").append(skill.name()).append(" 的工作流程已加载，请严格按上述流程执行本次任务；")
-                .append("若尚未规划任务清单，先调用 analyze_query 按本流程拆解任务再开始执行。");
+                .append("若尚未规划任务清单、或已规划但任务清单未按本流程拆解，")
+                .append("先调用 analyze_query 按本流程拆解（或重新规划）任务再开始执行。");
         return out.toString();
     }
 }

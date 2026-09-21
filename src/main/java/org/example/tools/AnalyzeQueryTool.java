@@ -8,6 +8,8 @@ import org.example.Config;
 import org.example.FactsStore;
 import org.example.LlmClient;
 import org.example.Msg;
+import org.example.Skill;
+import org.example.SkillState;
 import org.example.TaskStore;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
@@ -46,11 +48,13 @@ public class AnalyzeQueryTool implements AgentTool {
     private final Config.Llm llmCfg;
     private final TaskStore tasks;
     private final FactsStore facts;
+    private final SkillState skills;
 
-    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks, FactsStore facts) {
+    public AnalyzeQueryTool(Config.Llm llmCfg, TaskStore tasks, FactsStore facts, SkillState skills) {
         this.llmCfg = llmCfg;
         this.tasks = tasks;
         this.facts = facts;
+        this.skills = skills;
     }
 
     @Override
@@ -78,6 +82,16 @@ public class AnalyzeQueryTool implements AgentTool {
         // 重规划时注入当前进度，让新计划基于已掌握信息、仅补齐剩余缺口
         List<Msg> planMsgs = new ArrayList<>();
         planMsgs.add(Msg.system(PROMPT));
+        // 命中技能时把技能正文带给规划器（其内部调用看不到主对话）：任务按技能工作流程拆解，
+        // 任务内容自描述（上下文压缩后技能正文会丢，任务清单快照是流程的唯一幸存载体）
+        Skill skill = skills.get();
+        if (skill != null) {
+            planMsgs.add(Msg.system("用户述求已命中技能「" + skill.name() + "」，其完整工作流程如下，规划必须遵循：\n"
+                    + "- tasks 按该流程的步骤拆解：每步一个任务、相邻步骤可合并，不受 3-6 个限制；"
+                    + "每个任务的 content 以「第X步：」开头并内联该步关键纪律，保证仅凭任务清单即可继续执行。\n"
+                    + "- required_facts 的 dimension/period 按技能约定的命名式声明（后续入账逐字照抄）。\n\n"
+                    + skill.instructions()));
+        }
         String snapshot = tasks.snapshot();
         if (snapshot != null) {
             planMsgs.add(Msg.system("当前进度（供重规划参考，尽量复用已完成结论，只补齐缺口）：\n" + snapshot));
@@ -135,12 +149,20 @@ public class AnalyzeQueryTool implements AgentTool {
             o.set("depends_on", M.valueToTree(t.dependsOn()));
             o.put("status", t.status());
         }
-        return M.writerWithDefaultPrettyPrinter().writeValueAsString(out)
-                + "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
-                + "首次 web_search 之前先调用 locate_sources 定位本主题的权威来源域名，"
-                + "之后 web_search 优先带 domains 限定到这些域名（限定无结果再去掉 domains 开放检索），"
-                + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径），"
-                + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。";
+        // 回执尾巴：技能模式下不再推送 locate_sources/domains 的通用检索指令——
+        // 技能自有信源管线约定（如 travel-route-planning 的双管线），两条祈使句并存会互相打架
+        String tail = skill == null
+                ? "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
+                        + "首次 web_search 之前先调用 locate_sources 定位本主题的权威来源域名，"
+                        + "之后 web_search 优先带 domains 限定到这些域名（限定无结果再去掉 domains 开放检索），"
+                        + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径），"
+                        + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。"
+                : "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
+                        + "检索管线与工具用法按技能「" + skill.name() + "」的工作流程执行"
+                        + "（是否用 locate_sources、web_search 是否带 domains 以该流程为准），"
+                        + "每检索到一条关键数据立即用 record_facts 入账（含来源与口径），"
+                        + "发现新信息需要调整计划时可再次调用 analyze_query 重新规划。";
+        return M.writerWithDefaultPrettyPrinter().writeValueAsString(out) + tail;
     }
 
     /** 剥掉可能的围栏与说明文字：取首个 { 到末个 } 的片段解析。 */
