@@ -26,7 +26,7 @@ description: 旅游路线规划。根据出发地、目的地、天数、预算�
 | 景点/美食配图 | web_search | 传 `include-images: true`：Tavily 无独立图片搜索端点，主搜索响应末尾直接附带查询相关图片（描述+URL），随第五步攻略检索顺带开启，不为图片另花检索（见第五步「图片链接收集」） |
 | 预算汇总/油耗/汇率换算 | run_code | 显式计算，不口算 |
 | 事实入账 | record_facts | **查到即调，不攒批**。入参 `facts` 数组，每条必填 dimension、period、status（found/proxy/not_found），可选 metric/value/source/note；同 dimension+period+metric 重复入账覆盖旧值（多条体验素材并存时各用独立 dimension，见「事实账本·体验条目」）。返回「已入账 N 条」+ 覆盖缺口（dimension 已有覆盖目标而 period 不匹配时，会提示照抄目标 period 重录）；被拒条目（缺必填字段 / status 非法 / not_found 未写 note）按回执修正后立即重发。字段填写约定见「事实账本」 |
-| 分享知识卡片 | render_card | **用户要图卡时**（图片版报告 / 知识卡片 / 小红书风格图卡 / 可分享 PNG）：把最终输出整理为 markdown → 调 render_card（**单卡输出**，不传 split_mode）→ 每次调用消耗 md2card 积分：参数一次调对，API 业务报错（key 无效/积分不足）则停止，不重复轰炸                                                                                                                                                                                                                                                   |
+| 分享知识卡片 | render_card | **用户要图卡时**（图片版报告 / 知识卡片 / 小红书风格图卡 / 可分享 PNG）：把最终输出整理为 markdown——**整理时把账本里已核实的图源以 `![](图片URL)` 织入正文，主打景点与美食必须带图（md2card 会渲染网络图）** → 调 render_card（**单卡输出**，不传 split_mode）→ 每次调用消耗 md2card 积分：参数一次调对，API 业务报错（key 无效/积分不足）则停止，不重复轰炸                                                                                                                                                                                                                                                   |
 
 **信源双管线**——先分清查的是哪类信息，再选管线：
 
