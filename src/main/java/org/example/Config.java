@@ -31,8 +31,13 @@ public final class Config {
     /** read-file 工具：关键词检索默认返回的段落数。 */
     public record ReadFile(int maxResults) {}
 
+    /** render-card 工具：md2card API key（md2card.com/zh/my/api-keys 创建）；baseUrl 留空用官方主域名、失败自动换备用域名。 */
+    public record RenderCard(String apiKey, String baseUrl, int timeoutMs, String defaultTheme,
+                             int defaultWidth, int defaultHeight) {}
+
     /** 全量配置：llm + storage + tools 三段。 */
-    public record Data(Llm llm, WebSearch webSearch, Lbs lbs, Storage storage, ReadFile readFile) {}
+    public record Data(Llm llm, WebSearch webSearch, Lbs lbs, Storage storage, ReadFile readFile,
+                       RenderCard renderCard) {}
 
     public static Data load() {
         Map<String, Object> root = new Yaml().load(expandEnv(readText()));
@@ -42,6 +47,8 @@ public final class Config {
         Map<String, Object> lbs = asMap(tools.get("lbs-service"));
         Map<String, Object> storage = asMap(root.get("storage"));
         Map<String, Object> readFile = asMap(tools.get("read-file"));
+        Map<String, Object> renderCard = asMap(tools.get("render-card"));
+        String theme = str(renderCard, "default-theme");
         return new Data(
                 new Llm(
                         str(llm, "provider"), str(llm, "base-url"), str(llm, "model"), str(llm, "api-key"),
@@ -53,7 +60,14 @@ public final class Config {
                         intVal(webSearch, "max-results", 30)),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
                 new Storage(str(storage, "root-dir")),
-                new ReadFile(intVal(readFile, "max-results", 30)));
+                new ReadFile(intVal(readFile, "max-results", 30)),
+                new RenderCard(
+                        str(renderCard, "md2card-api-key"),
+                        str(renderCard, "base-url"),
+                        intVal(renderCard, "timeout-ms", 90000),
+                        theme.isBlank() ? "xiaohongshu" : theme,
+                        intVal(renderCard, "default-width", 440),
+                        intVal(renderCard, "default-height", 586)));
     }
 
     /** 文件根目录解析：显式配置 root-dir → 工作目录(user.dir) → 项目目录(code source 所在)。 */

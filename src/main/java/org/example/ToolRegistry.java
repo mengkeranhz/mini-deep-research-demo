@@ -136,6 +136,7 @@ public class ToolRegistry {
                 else if (types[i] == Config.Lbs.class) args[i] = cfg.lbs();
                 else if (types[i] == Config.Storage.class) args[i] = cfg.storage();
                 else if (types[i] == Config.ReadFile.class) args[i] = cfg.readFile();
+                else if (types[i] == Config.RenderCard.class) args[i] = cfg.renderCard();
                 else if (types[i] == Config.Data.class) args[i] = cfg;
                 else {
                     resolvable = false;
