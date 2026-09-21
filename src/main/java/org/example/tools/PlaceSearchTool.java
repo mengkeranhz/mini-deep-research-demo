@@ -24,7 +24,7 @@ public class PlaceSearchTool implements AgentTool {
 
     @Override
     public ToolDef definition() {
-        return new ToolDef(name(), "按名称查询地点（POI），返回名称/地址/经纬度列表。"
+        return new ToolDef(name(), "按名称查询地点（POI），返回名称/地址/经纬度/图片列表。"
                         + "查询到的经纬度可用于 search_nearby 或 route_query。",
                 Map.of("type", "object",
                         "properties", Map.of(
@@ -35,15 +35,18 @@ public class PlaceSearchTool implements AgentTool {
     @Override
     public String execute(JsonNode input) throws Exception {
         String name = ToolRegistry.str(input, "name");
+        // extensions=all 才返回 photos（title/url）
         JsonNode pois = amap.get("/v3/place/text", Map.of(
-                        "keywords", name, "offset", "5", "page", "1"))
+                        "keywords", name, "offset", "5", "page", "1", "extensions", "all"))
                 .path("pois");
         if (!pois.isArray() || pois.isEmpty()) {
             return "未找到地点: " + name;
         }
         StringBuilder sb = new StringBuilder("找到 ").append(pois.size()).append(" 个地点:\n");
         for (int i = 0; i < pois.size(); i++) {
-            sb.append(i + 1).append(". ").append(AmapClient.poiLine(pois.get(i))).append('\n');
+            JsonNode poi = pois.get(i);
+            sb.append(i + 1).append(". ").append(AmapClient.poiLine(poi))
+                    .append(AmapClient.photoLine(poi)).append('\n');
         }
         return sb.toString();
     }

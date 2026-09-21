@@ -80,4 +80,25 @@ public final class AmapClient {
                 + " | 地址: " + text(poi.path("address"))
                 + " | 经纬度: " + text(poi.path("location"));
     }
+
+    /** POI 节点的 photos（extensions=all 时返回，无图为 ""/[]）→「 | 图片: title(url) · …」，无图返回空串。 */
+    public static String photoLine(JsonNode poi) {
+        JsonNode photos = poi.path("photos");
+        if (!photos.isArray()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (JsonNode photo : photos) {
+            String url = text(photo.path("url"));
+            if (url.isBlank()) {
+                continue;
+            }
+            String title = text(photo.path("title"));
+            if (sb.length() > 0) {
+                sb.append(" · ");
+            }
+            sb.append(title.isBlank() ? url : title + '(' + url + ')');
+        }
+        return sb.length() == 0 ? "" : " | 图片: " + sb;
+    }
 }
