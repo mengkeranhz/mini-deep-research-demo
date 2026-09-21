@@ -44,9 +44,19 @@ public final class SkillRegistry {
         return sb.toString();
     }
 
-    /** 按名称查找技能（load_skill 用）。 */
+    /** 按名称查找技能（load_skill 用）；精确匹配优先，未命中时按归一化名称兜底。 */
     public static Optional<Skill> find(String name) {
-        return SKILLS.stream().filter(s -> s.name().equals(name)).findFirst();
+        if (name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        String q = name.strip();
+        return SKILLS.stream().filter(s -> s.name().equals(q)).findFirst()
+                .or(() -> SKILLS.stream().filter(s -> normalize(s.name()).equals(normalize(q))).findFirst());
+    }
+
+    /** 名称归一化：小写、连续下划线/空白折算为连字符——化解 _ 与 - 的手滑变体。 */
+    private static String normalize(String s) {
+        return s.strip().toLowerCase().replaceAll("[_\\s]+", "-");
     }
 
     /** 全部技能名（未知名称时的提示用）。 */
