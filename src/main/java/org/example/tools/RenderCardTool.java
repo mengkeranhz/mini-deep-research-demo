@@ -50,7 +50,8 @@ public class RenderCardTool implements AgentTool {
                         + "nature（清新自然）、darktech（技术）、business（商务）。"
                         + "用户指定风格或常用主题不合适时，先 read_file docs/render-card-themes.md "
                         + "读完整主题表（23 套主题的适用场景、theme_mode 可选值、type 尺寸预设），再选 theme 与 theme_mode。"
-                        + "长文拆多卡用 split_mode=hrSplit（按 --- 分隔线拆，比 autoSplit 快）。返回本地 PNG 路径清单。",
+                        + "默认单卡输出（一份内容一张长图卡，不传 split_mode 即可）；"
+                        + "仅当用户明确要求拆成多张卡片时才传 split_mode=hrSplit（按 --- 分隔线拆）。返回本地 PNG 路径清单。",
                 Map.of("type", "object",
                         "properties", Map.ofEntries(
                                 Map.entry("markdown", Map.of("type", "string", "description", "Markdown 全文（与 file_path 二选一）")),
@@ -70,7 +71,7 @@ public class RenderCardTool implements AgentTool {
                                 Map.entry("height", Map.of("type", "integer", "description",
                                         "卡片高度 px（200-2000），默认 586（440×586 约 3:4，适合小红书）；与 type 二选一")),
                                 Map.entry("split_mode", Map.of("type", "string", "enum", List.of("noSplit", "autoSplit", "hrSplit"),
-                                        "description", "拆卡模式，默认 noSplit 单卡；长文多卡用 hrSplit（按 --- 分隔线拆）")),
+                                        "description", "默认 noSplit 单卡（一份内容一张图，无需传此参数）；仅用户明确要多张拆分卡时才传 hrSplit（按 --- 拆）")),
                                 Map.entry("mdx_mode", Map.of("type", "boolean", "description",
                                         "启用 MDX（JSX/自定义字体/公式/Mermaid 图表），默认 false")),
                                 Map.entry("over_hidden_mode", Map.of("type", "boolean", "description",
