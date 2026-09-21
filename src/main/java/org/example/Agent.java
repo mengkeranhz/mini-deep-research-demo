@@ -2,13 +2,16 @@ package org.example;
 
 import org.example.tools.FinalAnswerTool;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Scanner;
 
 /**
  * Agent loop（对应方案 7 步）：
  * 轮次上限 → 注入任务进度与事实账本快照 → LLM（人格 + 工具元信息 + 对话与思考）→
- * 无工具纯文本直接作为本次结论返回（不触发校验）；调用 final_answer 提交答案时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
+ * 无工具纯文本：任务已全部完成（或未规划）时作为结论返回（不触发校验）、任务未完成时视为面向用户的
+ * 陈述、等待 stdin 回复后继续；调用 final_answer 提交答案时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
  * 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本）。
  */
 public class Agent {
@@ -34,6 +37,8 @@ public class Agent {
     private final TaskStore tasks;
     private final FactsStore facts;
     private final SkillState skillState;
+    /** 运行中的用户回复通道：任务未完成时模型向用户提问，从这里读回答。 */
+    private final Scanner console = new Scanner(System.in, StandardCharsets.UTF_8);
 
     public Agent() {
         this.cfg = Config.load();
@@ -94,11 +99,33 @@ public class Agent {
                 }
             }
             if (toolCalls.isEmpty()) {
-                // 无工具纯文本 = 对用户的直接陈述（澄清提问或最终结论），原样返回、不走终答闸门——
-                // 中途提问（如技能第一步的集中澄清）曾被校验当「不合格答案」打回，陷入缺陷回传循环。
-                // 终答质量闸门只在 final_answer 提交路径上生效
-                transcript.append("助手: ").append(resp.text()).append('\n');
-                return resp.text();
+                String candidate = resp.text();
+                // 无工具纯文本：任务已全部完成（或未规划）→ 最终结论，直接返回、不走终答闸门
+                //（中途提问曾被校验当「不合格答案」打回；终答质量闸门只在 final_answer 路径生效）
+                if (tasks.allDone()) {
+                    transcript.append("助手: ").append(candidate).append('\n');
+                    return candidate;
+                }
+                // 任务未完成 → 纯文本视为面向用户的中间陈述（如技能第一步的集中澄清）：
+                // 打印并等待用户 stdin 回复（直接回车=按已入账假设继续），回复进入对话后继续执行，
+                // 不结束运行——「提问」与「终答」不再共用同一条退出路径
+                messages.add(Msg.assistant(resp.blocks()));
+                transcript.append("助手: ").append(candidate.isEmpty() ? "（中间陈述）" : candidate).append('\n');
+                String reply;
+                if (candidate.isBlank()) {
+                    reply = "（上一轮没有文本输出也没有工具调用——请继续执行任务清单，不要停）";
+                } else {
+                    System.out.println(Console.header("\n[等待用户回复]") + "（直接回车 = 按默认假设继续执行）");
+                    System.out.print("> ");
+                    System.out.flush();
+                    String line = console.nextLine();
+                    reply = line.isBlank()
+                            ? "（用户未回复。不要再询问，基于事实账本中已入账的假设按默认方案继续执行任务清单。）"
+                            : line;
+                }
+                messages.add(Msg.user(reply));
+                transcript.append("用户: ").append(reply).append('\n');
+                continue;
             }
             for (Block.ToolUse u : toolCalls) {
                 System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));

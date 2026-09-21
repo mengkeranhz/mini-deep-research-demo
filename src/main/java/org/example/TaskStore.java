@@ -60,6 +60,11 @@ public class TaskStore {
                 + "/" + tasks.size() + " 完成";
     }
 
+    /** 全部任务已完成（无任务时视为已完成）——Agent 判定无工具文本是终答还是中间陈述用。 */
+    public boolean allDone() {
+        return tasks.stream().allMatch(t -> "done".equals(t.status()));
+    }
+
     /**
      * 固定校验基线：首次规划时的总体计划、硬约束与信息缺口。
      * 与 snapshot() 不同，本方法内容不随重规划变化，用于最终校验始终对照原始约束。
