@@ -15,7 +15,9 @@ import java.util.List;
 import java.util.Map;
 
 /** web_search：Tavily 搜索 API（key 来自 config.yaml 的 tools.web-search；max-results 由 LLM 传参，缺省 30）。
- *  可选 domains 限定检索域名（映射 include_domains，裸域名匹配自身及全部子域），配合 locate_sources 使用。 */
+ *  可选 domains 限定检索域名（映射 include_domains，裸域名匹配自身及全部子域），配合 locate_sources 使用。
+ *  可选 include-images（映射 include_images，并固定开 include_image_descriptions 取图片描述）：Tavily 无独立
+ *  图片搜索端点，开启后主搜索响应附带查询相关图片，渲染为「图片」清单附在结果列表之后。 */
 public class WebSearchTool implements AgentTool {
 
     private static final ObjectMapper M = new ObjectMapper();
@@ -37,7 +39,8 @@ public class WebSearchTool implements AgentTool {
     @Override
     public ToolDef definition() {
         return new ToolDef(name(), "联网搜索，返回结果列表（标题/链接/内容摘要）。用于查找资料来源；"
-                + "可用 domains 限定到 locate_sources 定位的权威域名（限定后无结果可去掉重试）。",
+                + "可用 domains 限定到 locate_sources 定位的权威域名（限定后无结果可去掉重试）；"
+                + "需要图片时传 include-images: true，响应末尾附带查询相关图片（描述+URL）清单。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "keywords", Map.of(
@@ -50,7 +53,10 @@ public class WebSearchTool implements AgentTool {
                                 "domains", Map.of(
                                         "type", "array",
                                         "items", Map.of("type", "string"),
-                                        "description", "限定检索的域名，可选；传裸域名（如 stats.gov.cn），匹配自身及全部子域名")),
+                                        "description", "限定检索的域名，可选；传裸域名（如 stats.gov.cn），匹配自身及全部子域名"),
+                                "include-images", Map.of(
+                                        "type", "boolean",
+                                        "description", "是否在搜索结果中附带查询相关图片，默认 false；开启后响应末尾列出图片（描述+URL）")),
                         "required", List.of("keywords")));
     }
 
@@ -62,11 +68,16 @@ public class WebSearchTool implements AgentTool {
         String query = String.join(" ", ToolRegistry.strList(input, "keywords"));
         int maxResults = ToolRegistry.optInt(input, "max-results", 30);
         List<String> domains = normalizeDomains(input.get("domains"));
+        boolean includeImages = input.path("include-images").asBoolean(false);
         ObjectNode body = M.createObjectNode();
         body.put("query", query).put("max_results", maxResults);
         if (!domains.isEmpty()) {
             ArrayNode arr = body.putArray("include_domains");
             domains.forEach(arr::add);
+        }
+        if (includeImages) {
+            // Tavily 无独立图片端点：主搜索请求带 include_images，响应即附查询相关图片；descriptions 拿图片描述便于识别内容
+            body.put("include_images", true).put("include_image_descriptions", true);
         }
 
         Http.Response resp = Http.post(API, Map.of("Authorization", "Bearer " + cfg.tavilyApiKey()),
@@ -75,9 +86,10 @@ public class WebSearchTool implements AgentTool {
             throw new IllegalStateException("HTTP " + resp.status() + " <- Tavily: "
                     + new String(resp.body(), StandardCharsets.UTF_8));
         }
+        JsonNode root = M.readTree(resp.body());
         StringBuilder sb = new StringBuilder();
         int n = 0;
-        for (JsonNode r : M.readTree(resp.body()).path("results")) {
+        for (JsonNode r : root.path("results")) {
             sb.append(++n).append(". ").append(r.path("title").asText())
                     .append("\n   链接: ").append(r.path("url").asText())
                     .append('\n').append(ABSTRACT_PREFIX).append(r.path("content").asText()).append('\n');
@@ -87,8 +99,31 @@ public class WebSearchTool implements AgentTool {
                     ? "未搜到结果，建议更换关键词"
                     : "未搜到结果（本次限定 domains=" + domains + "）：域名可能过窄或有误，可去掉 domains 重试";
         }
-        return "搜索「" + query + "」" + (domains.isEmpty() ? "" : "（限定 " + domains + "）")
-                + "得到 " + n + " 条结果:\n" + sb;
+        String header = "搜索「" + query + "」" + (domains.isEmpty() ? "" : "（限定 " + domains + "）")
+                + "得到 " + n + " 条结果:\n";
+        if (!includeImages) {
+            return header + sb;
+        }
+        return header + sb + renderImages(root.path("images"));
+    }
+
+    /** include_images 开启时渲染顶层 images 清单；兼容对象项（url/description）与旧版纯 URL 字符串项。 */
+    private static String renderImages(JsonNode images) {
+        if (!images.isArray() || images.isEmpty()) {
+            return "本次响应未附带图片：可换更具体的对象名/场景词重试\n";
+        }
+        StringBuilder sb = new StringBuilder("图片 " + images.size() + " 张:\n");
+        int i = 0;
+        for (JsonNode img : images) {
+            String url = img.isTextual() ? img.asText() : img.path("url").asText("");
+            String desc = img.isTextual() ? "" : img.path("description").asText("");
+            if (desc.isBlank()) {
+                desc = img.path("title").asText(""); // description 常为 null，回退用来源页标题
+            }
+            sb.append(++i).append(". ").append(desc.isBlank() ? url : desc)
+                    .append("\n   链接: ").append(url).append('\n');
+        }
+        return sb.toString();
     }
 
     /** domains 归一化：小写、去协议、截首个 /、去 www. 前缀（否则只剩精确 host 匹配，静默漏掉子域名），去空去重。 */
