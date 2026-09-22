@@ -100,9 +100,10 @@ public class Agent {
             }
             if (toolCalls.isEmpty()) {
                 String candidate = resp.text();
-                // 无工具纯文本：任务已全部完成（或未规划）→ 最终结论，直接返回、不走终答闸门
-                //（中途提问曾被校验当「不合格答案」打回；终答质量闸门只在 final_answer 路径生效）
-                if (tasks.allDone()) {
+                // 无工具纯文本：任务已全部完成 → 最终结论，直接返回、不走终答闸门。
+                // 未规划（空任务）或任务未完成 → 视为面向用户的中间陈述（如技能第一步的集中澄清），
+                // 等待用户 stdin 回复后继续（中途提问曾被校验当「不合格答案」打回，故不走 final_answer 闸门）
+                if (!tasks.isEmpty() && tasks.allDone()) {
                     transcript.append("助手: ").append(candidate).append('\n');
                     return candidate;
                 }
