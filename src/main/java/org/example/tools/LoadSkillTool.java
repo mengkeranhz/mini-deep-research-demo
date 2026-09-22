@@ -32,7 +32,7 @@ public class LoadSkillTool implements AgentTool {
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "skill", Map.of("type", "string",
-                                        "description", "技能名称，与系统提示词「可用技能」清单完全一致（命名用连字符，如 travel-route-planning）")),
+                                        "description", "技能名称，与系统提示词「可用技能」清单完全一致（命名用连字符，如 travel-viral-guide）")),
                         "required", List.of("skill")));
     }
 

@@ -150,7 +150,7 @@ public class AnalyzeQueryTool implements AgentTool {
             o.put("status", t.status());
         }
         // 回执尾巴：技能模式下不再推送 locate_sources/domains 的通用检索指令——
-        // 技能自有信源管线约定（如 travel-route-planning 的双管线），两条祈使句并存会互相打架
+        // 技能自有信源管线约定（如 travel-viral-guide 的双管线），两条祈使句并存会互相打架
         String tail = skill == null
                 ? "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
                         + "首次 web_search 之前先调用 locate_sources 定位本主题的权威来源域名，"
