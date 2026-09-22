@@ -20,6 +20,8 @@ public class Agent {
     static final int CONTEXT_TOKEN_THRESHOLD = 60_000;
     /** 对话稿中每条工具结果正文的最大保留长度（足够保住数值与链接，又不让稿子膨胀）。 */
     static final int TRANSCRIPT_TOOL_BODY_LIMIT = 1_500;
+    /** 网关内容审核（Content Exists Risk）连续触发的最大恢复次数，超过则抛错退出——防账本本身带敏感内容时死循环；成功调用后计数清零。 */
+    static final int MAX_CONTENT_RISK_RECOVERIES = 3;
 
     /** 最终校验器提示词：对照约束、事实账本与覆盖目标检查草稿，通过输出 PASS，否则逐条列缺陷。 */
     private static final String VERIFY_PROMPT = """
@@ -58,6 +60,7 @@ public class Agent {
         // 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）
         StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
         String bestAnswer = null; // 当前最完整的交付草稿：校验/压缩围绕它，最终返回的是完整答案而非补丁
+        int contentRiskRecoveries = 0; // 网关内容审核恢复计数（连续触发才累加，成功调用后清零）
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
@@ -85,7 +88,28 @@ public class Agent {
                 }
             }
 
-            LlmResponse resp = llm.call(registry.definitions(), callMessages);
+            LlmResponse resp;
+            try {
+                resp = llm.call(registry.definitions(), callMessages);
+                contentRiskRecoveries = 0; // 调用成功即清零：只有连续触发才受上限约束
+            } catch (RuntimeException e) {
+                // DeepSeek 系网关输入审核：请求体（累积历史）里某段被判「Content Exists Risk」整次 400。
+                // 重试无意义（内容仍在请求体里），改为丢弃历史、以事实账本重建上下文后进入下一轮。
+                if (contentRiskRecoveries < MAX_CONTENT_RISK_RECOVERIES && isContentRisk(e)) {
+                    contentRiskRecoveries++;
+                    System.out.println(Console.error("\n[内容风险] 输入触发网关内容审核（Content Exists Risk），"
+                            + "第 " + contentRiskRecoveries + "/" + MAX_CONTENT_RISK_RECOVERIES
+                            + " 次丢弃历史、以账本重建后继续…"));
+                    String rebuilt = "此前累积的对话历史触发网关内容审核被拦截，已全部丢弃；"
+                            + "以下依据任务原始述求与事实账本继续执行。"
+                            + "\n\n" + rebuild(request, bestAnswer, null);
+                    messages = new ArrayList<>(List.of(
+                            Msg.system(SystemPrompt.withSkills()), Msg.user(rebuilt)));
+                    transcript = new StringBuilder("用户: ").append(rebuilt).append('\n');
+                    continue;
+                }
+                throw e;
+            }
             if (cfg.llm().streaming()) {
                 System.out.println(); // 结束流式文本行
             } else {
@@ -182,32 +206,10 @@ public class Agent {
                 // 6.2 无工具单次调用总结（直接发原 messages 会因 tool_use 缺 tool_result 报错）
                 String summary = llm.summarize(transcript.toString());
                 System.out.println("[上下文压缩] 摘要:\n" + summary);
-                // 6.3 重建：旧对话与思考全部清除，保留原始述求 + 摘要 + 事实账本 + 旧草稿 + 继续指令。
-                // 账本在草稿之前且声明为最终权威——旧草稿只是结构参考，与账本冲突的数据一律以账本为准重写，
-                // 防止压缩后被陈旧草稿锚定（草稿只在无工具轮更新，连续检索期它必然落后于账本）
-                StringBuilder rebuilt = new StringBuilder("原始任务述求：\n").append(request)
-                        .append("\n\n之前的执行进度摘要：\n").append(summary);
-                // 已加载技能正文确定性重注入（重水化）：压缩重建的白名单只含技能 name/description，
-                // 正文不补回则技能在压缩后失忆——技能是流程状态，不是聊天记录
-                Skill activeSkill = skillState.get();
-                if (activeSkill != null) {
-                    rebuilt.append("\n\n【已加载技能：").append(activeSkill.name())
-                            .append("，本次任务按其完整工作流程继续严格执行】\n")
-                            .append(activeSkill.instructions());
-                }
-                String ledger = facts.ledger();
-                if (ledger != null) {
-                    rebuilt.append("\n\n【事实账本：已检索入账的结构化数据，最终权威依据】\n")
-                            .append(ledger)
-                            .append("最终答案的全部数据必须与账本一致；摘要或旧草稿与账本冲突时，以账本为准。");
-                }
-                if (bestAnswer != null && !bestAnswer.isBlank()) {
-                    rebuilt.append("\n\n【旧答案草稿：仅供结构参考，其中与事实账本冲突或账本已更新的数据必须重写】\n")
-                            .append(bestAnswer);
-                }
-                rebuilt.append("\n\n请基于以上进度继续完成任务；后续作答数据一律以事实账本为准。");
+                // 6.3 重建：旧对话与思考全部清除，保留原始述求 + 摘要 + 事实账本 + 旧草稿 + 继续指令（拼装逻辑见 rebuild）。
+                String rebuilt = rebuild(request, bestAnswer, summary);
                 messages = new ArrayList<>(List.of(
-                        Msg.system(SystemPrompt.withSkills()), Msg.user(rebuilt.toString())));
+                        Msg.system(SystemPrompt.withSkills()), Msg.user(rebuilt)));
                 transcript = new StringBuilder("用户: ").append(rebuilt).append('\n');
             }
         }
@@ -286,5 +288,48 @@ public class Agent {
         String s = content.strip();
         return s.length() <= TRANSCRIPT_TOOL_BODY_LIMIT ? s
                 : s.substring(0, TRANSCRIPT_TOOL_BODY_LIMIT) + "…（截断）";
+    }
+
+    /**
+     * 压缩 / 内容风险恢复共用：以「原始述求 + 可选进度摘要 + 技能正文 + 事实账本 + 旧草稿」拼出重建后的用户消息文本。
+     * summary 传 null 表示无摘要——内容风险恢复不得复述被标记的原文，数据连续性由事实账本保证。
+     * 账本置于草稿之前并声明为最终权威，防止重建后被陈旧草稿锚定。
+     */
+    private String rebuild(String request, String bestAnswer, String summary) {
+        StringBuilder rebuilt = new StringBuilder("原始任务述求：\n").append(request);
+        if (summary != null && !summary.isBlank()) {
+            rebuilt.append("\n\n之前的执行进度摘要：\n").append(summary);
+        }
+        // 已加载技能正文确定性重注入（重水化）：压缩重建的白名单只含技能 name/description，
+        // 正文不补回则技能在压缩后失忆——技能是流程状态，不是聊天记录
+        Skill activeSkill = skillState.get();
+        if (activeSkill != null) {
+            rebuilt.append("\n\n【已加载技能：").append(activeSkill.name())
+                    .append("，本次任务按其完整工作流程继续严格执行】\n")
+                    .append(activeSkill.instructions());
+        }
+        String ledger = facts.ledger();
+        if (ledger != null) {
+            rebuilt.append("\n\n【事实账本：已检索入账的结构化数据，最终权威依据】\n")
+                    .append(ledger)
+                    .append("最终答案的全部数据必须与账本一致；摘要或旧草稿与账本冲突时，以账本为准。");
+        }
+        if (bestAnswer != null && !bestAnswer.isBlank()) {
+            rebuilt.append("\n\n【旧答案草稿：仅供结构参考，其中与事实账本冲突或账本已更新的数据必须重写】\n")
+                    .append(bestAnswer);
+        }
+        rebuilt.append("\n\n请基于以上进度继续完成任务；后续作答数据一律以事实账本为准。");
+        return rebuilt.toString();
+    }
+
+    /** 判断异常是否为网关输入审核拦截（Content Exists Risk）：遍历异常链，任一消息命中即认定。 */
+    private static boolean isContentRisk(Throwable t) {
+        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            String msg = cur.getMessage();
+            if (msg != null && msg.contains("Content Exists Risk")) {
+                return true;
+            }
+        }
+        return false;
     }
 }
