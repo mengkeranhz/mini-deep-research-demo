@@ -57,7 +57,10 @@ public class RenderCardTool implements AgentTool {
                         + "仅当用户明确要求拆成多张卡片时才传 split_mode=hrSplit（按 --- 分隔线拆）。返回本地 PNG 路径清单。",
                 Map.of("type", "object",
                         "properties", Map.ofEntries(
-                                Map.entry("markdown", Map.of("type", "string", "description", "Markdown 全文（与 file_path 二选一）")),
+                                Map.entry("markdown", Map.of("type", "string", "description",
+                                        "Markdown 全文（与 file_path 二选一）；硬限制 ≤10000 字符"
+                                                + "（UTF-16 code unit 口径，即 JS .length()、emoji 记 2，含 10000 本身），"
+                                                + "超限 md2card 必然报错")),
                                 Map.entry("file_path", Map.of("type", "string", "description",
                                         "Markdown 文件路径，相对根目录解析（与 markdown 二选一）")),
                                 Map.entry("theme", Map.of("type", "string", "description",
@@ -101,6 +104,11 @@ public class RenderCardTool implements AgentTool {
         String md = hasFile ? readFile(filePath) : markdown;
         if (md.isBlank()) {
             throw new IllegalArgumentException("markdown 内容为空");
+        }
+        // md2card 硬限制：markdown ≤10000 字符，按 UTF-16 code unit 计数（String.length() 即该口径，同 JS .length()），含 10000 本身
+        if (md.length() > 10000) {
+            throw new IllegalArgumentException("markdown 长度 " + md.length() + " 超过 md2card 硬限制 10000 字符"
+                    + "（UTF-16 code unit 口径，emoji 记 2），调用必然失败——精简到 ≤10000 或改走降级交付，勿原样重试");
         }
 
         String theme = orDefault(ToolRegistry.optStr(input, "theme"), cfg.defaultTheme());

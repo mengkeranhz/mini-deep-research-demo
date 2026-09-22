@@ -52,5 +52,6 @@
 
 ## 其他
 
+- `markdown` 字段硬限制 **≤10000 字符**：按 UTF-16 code unit 计数（即 JS `.length()` 语义、emoji 记 2），含 10000 本身——超限调用必然失败，超长内容先精简再调，勿原样重试。
 - `mdx_mode: true` 启用 MDX（JSX/自定义字体/公式/Mermaid 图表）。
 - 服务端超时 60s，首次调用可能较慢；每次调用消耗 md2card 积分。
