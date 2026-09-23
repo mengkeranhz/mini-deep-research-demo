@@ -19,7 +19,8 @@ import java.util.stream.Stream;
 
 /**
  * Anthropic 协议实现：POST {base-url}/v1/messages。
- * 流式：逐行读 SSE，按 index 累积 content block（text/thinking 签名/tool_use 的分片 JSON），结束时统一转 Block。
+ * 流式：逐行读 SSE，按 index 累积 content block（text/thinking 签名/tool_use 的分片 JSON），结束时统一转 Block；
+ * 流中断（残缺 JSON / 未见收尾事件 / 空流）一律按 StreamError 走 HttpRetry 重试，不把半截输出混进 Agent。
  * 思考档位（cfg.thinking）原样透传：off/disabled → thinking.type=disabled；其余值发顶层 reasoning_effort
  * 对应档位（low/medium/high 等，以网关支持为准）；留空不发送、走网关默认档。
  * 采样参数 top_p 仅在配置 ≥0 时发送（未配置用服务端默认）。
@@ -126,6 +127,7 @@ final class AnthropicClient implements LlmClient {
         Map<Integer, ObjectNode> open = new HashMap<>(); // index → 累积中的 content block
         int[] usage = {0, 0};
         long[] cacheRead = {0}; // 前缀缓存命中 token（message_start 与 message_delta 均可能携带）
+        boolean[] completed = {false}; // 收到正常收尾信号（message_delta 的 stop_reason / message_stop）
         try (Stream<String> lines = resp.body()) {
             lines.filter(line -> line.startsWith("data:")).forEach(line -> {
                 String payload = line.substring(5).strip();
@@ -153,12 +155,16 @@ final class AnthropicClient implements LlmClient {
                             cacheRead[0] = d.path("usage").path("cache_read_input_tokens").asLong();
                         }
                         String sr = d.path("delta").path("stop_reason").asText("");
-                        // 异常收尾（max_tokens 截断 / refusal 拒答等）就地亮明，别让它无声滑过
-                        if (!sr.isBlank() && !"end_turn".equals(sr) && !"tool_use".equals(sr)
-                                && !"stop_sequence".equals(sr)) {
-                            System.out.println(Console.warn("[stop_reason] " + sr));
+                        if (!sr.isBlank()) {
+                            completed[0] = true;
+                            // 异常收尾（max_tokens 截断 / refusal 拒答等）就地亮明，别让它无声滑过
+                            if (!"end_turn".equals(sr) && !"tool_use".equals(sr)
+                                    && !"stop_sequence".equals(sr)) {
+                                System.out.println(Console.warn("[stop_reason] " + sr));
+                            }
                         }
                     }
+                    case "message_stop" -> completed[0] = true;
                     // 网关 200 但流内 error 事件（上游过载/审核/内部错误等）：上抛走重试——
                     // 此前走 default 被静默丢弃，整条流被当成「成功」的空响应返回
                     case "error" -> throw new HttpRetry.StreamError("网关流内 error 事件: "
@@ -168,10 +174,13 @@ final class AnthropicClient implements LlmClient {
                 }
             });
         }
-        // 整流无任何内容块且无用量（连 message_start 都没发）＝网关空流：按瞬时故障上抛重试，
-        // 不让 0 blocks / 0 token 的「成功」流混进 Agent 被当空结论
-        if (blocks.isEmpty() && usage[1] == 0 && cacheRead[0] == 0) {
-            throw new HttpRetry.StreamError("流式响应无任何内容块与用量（疑似网关空流）");
+        // 整流未见收尾信号（连 message_delta 都没发＝网关空流或仅 message_start 即中断；内容块收到一半
+        // 流被掐断＝半截文本/缺尾的工具参数）：按瞬时故障上抛重试，不让残缺输出被当「成功」轮次混进 Agent。
+        // usage 输出量兜底：个别网关不发 stop_reason，但有完整用量同样视为正常收尾。
+        if (!completed[0] && usage[1] == 0) {
+            throw new HttpRetry.StreamError(blocks.isEmpty()
+                    ? "流式响应无任何内容块与用量（疑似网关空流/仅 message_start 即中断）"
+                    : "流式响应疑似中途截断：已收 " + blocks.size() + " 个内容块但未见收尾事件");
         }
         return new LlmResponse(blocks, usage[0], usage[1], cacheRead[0]);
     }
@@ -334,11 +343,18 @@ final class AnthropicClient implements LlmClient {
         return o;
     }
 
+    /**
+     * 解析网关返回的 JSON（响应体 / SSE 数据行 / 工具参数分片累积），供 anthropic 与 openai 客户端共用。
+     * 网关偶发流中断会产生残缺 JSON（Unexpected end-of-input 等，实测在 63KB 分片累积处截断）：
+     * 按 StreamError 上抛走 HttpRetry 重试。此前抛普通 RuntimeException 不在重试白名单里，
+     * 直穿重试层把整轮 Agent 打崩退出。
+     */
     static JsonNode parse(String json) {
         try {
             return M.readTree(json);
         } catch (Exception e) {
-            throw new RuntimeException("JSON 解析失败: " + e.getMessage(), e);
+            throw new HttpRetry.StreamError("JSON 解析失败（疑似网关响应截断/损坏）: " + e.getMessage()
+                    + "；片段: " + (json.length() <= 120 ? json : json.substring(0, 120) + "…"));
         }
     }
 }

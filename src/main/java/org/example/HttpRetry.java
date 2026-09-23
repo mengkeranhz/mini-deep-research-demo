@@ -5,8 +5,8 @@ import java.io.UncheckedIOException;
 
 /**
  * LLM 网关调用的瞬时故障重试：网络中断/超时与 HTTP 429、5xx 自动重试（退避 1s、2s、4s），最多 3 次；
- * 网关 200 但 SSE 流内异常（error 事件 / 整流无内容无用量，StreamError）同样按瞬时故障重试；
- * 4xx 属请求本身有误，不重试直接上抛。供 anthropic / openai 协议客户端共用。
+ * 网关 200 但 SSE 流内异常（error 事件 / 整流无内容无用量 / 流中途截断产生残缺 JSON，StreamError）
+ * 同样按瞬时故障重试；4xx 属请求本身有误，不重试直接上抛。供 anthropic / openai 协议客户端共用。
  */
 final class HttpRetry {
 
@@ -26,7 +26,7 @@ final class HttpRetry {
         }
     }
 
-    /** 网关返回 200 但 SSE 流内异常（error 事件 / 整流无任何内容块与用量）——按瞬时故障重试。 */
+    /** 网关返回 200 但流内异常（error 事件 / 整流无任何内容块与用量 / 截断产生的残缺 JSON）——按瞬时故障重试。 */
     static final class StreamError extends RuntimeException {
         StreamError(String message) {
             super(message);

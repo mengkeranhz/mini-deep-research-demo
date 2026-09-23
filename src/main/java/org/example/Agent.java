@@ -71,200 +71,274 @@ public class Agent {
         this.registry = new ToolRegistry(cfg, tasks, facts, skillState, searchLog);
     }
 
+    /**
+     * Agent 主循环（整体流程对应方案 7 步）：每轮轮内四阶段——
+     * ① 尾注快照 + LLM 调用 → ② 纯文本/工具分流 → ③ 工具执行（含终答闸门）→ ④ 超阈值压缩。
+     * 三条退出路径：任务全完成的纯文本直接作为结论返回（不触发校验）、final_answer 过终答闸门返回、
+     * 超轮次上限抛错。各阶段的设计取舍与细节见对应私有方法的注释。
+     */
     public String run(String request) {
-        List<Msg> messages = new ArrayList<>();
-        messages.add(Msg.system(SystemPrompt.withSkills()));
-        messages.add(Msg.user(request));
-        // 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）
-        StringBuilder transcript = new StringBuilder("用户: ").append(request).append('\n');
-        String bestAnswer = null; // 当前最完整的交付草稿：校验/压缩围绕它，最终返回的是完整答案而非补丁
-        int contentRiskRecoveries = 0; // 网关内容审核恢复计数（连续触发才累加，成功调用后清零）
-
+        // 跨轮可变状态：对话消息、纯文本对话稿（供压缩摘要）、最完整草稿、内容审核恢复计数；
+        // 内容审核恢复与压缩重建时整体 reset 重开对话，而非在旧历史上追加
+        RunState state = RunState.initial(request);
         for (int round = 1; round <= MAX_ROUNDS; round++) {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
 
-            // LLM 看不到 TaskStore / FactsStore 外部状态 → 每轮重算任务进度与事实账本快照，
-            // 以用户消息追加在对话末尾（只放进本次调用的副本，messages 不留旧快照，天然无陈旧堆积、
-            // 压缩重建也无需处理）。位置决定缓存命运：快照每轮变化，此前插在历史头部会把其后全部内容
-            // 变成缓存 miss；放尾部后 system+历史是逐轮只追加的稳定前缀，AnthropicClient 在倒数第二条
-            // 消息上打的 cache_control 断点逐轮增量命中。账本快照带覆盖缺口，逼模型补齐而非提前收工
-            String snapshot = tasks.snapshot();
-            String factsSnapshot = facts.snapshot();
-            List<Msg> callMessages = messages;
-            if (snapshot != null || factsSnapshot != null) {
-                if (snapshot != null) {
-                    System.out.println(Console.header("[任务快照已注入·尾注] ") + tasks.progress());
-                }
-                if (factsSnapshot != null) {
-                    System.out.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
-                }
-                callMessages = new ArrayList<>(messages);
-                if (snapshot != null) {
-                    callMessages.add(Msg.user(snapshot));
-                }
-                if (factsSnapshot != null) {
-                    callMessages.add(Msg.user(factsSnapshot));
-                }
+            // ① LLM 调用（带尾注快照）：任务进度与事实账本以用户消息追加在本次调用副本的末尾——
+            //    快照每轮变化，放头部会破坏前缀缓存，放尾部则 system+历史逐轮只追加（详见 withTailSnapshots）。
+            //    返回 null = 输入触发网关内容审核：历史已丢弃并按账本重建，本轮到此为止
+            LlmResponse resp = callLlm(state, request, withTailSnapshots(state.messages));
+            if (resp == null) {
+                continue; // 网关内容审核已恢复：历史已丢弃并按账本重建，进入下一轮
             }
 
-            long llmStart = System.nanoTime();
-            LlmResponse resp;
-            try {
-                resp = llm.call(registry.definitions(), callMessages);
-                contentRiskRecoveries = 0; // 调用成功即清零：只有连续触发才受上限约束
-            } catch (RuntimeException e) {
-                // DeepSeek 系网关输入审核：请求体（累积历史）里某段被判「Content Exists Risk」整次 400。
-                // 重试无意义（内容仍在请求体里），改为丢弃历史、以事实账本重建上下文后进入下一轮。
-                if (contentRiskRecoveries < MAX_CONTENT_RISK_RECOVERIES && isContentRisk(e)) {
-                    contentRiskRecoveries++;
-                    System.out.println(Console.error("\n[内容风险] 输入触发网关内容审核（Content Exists Risk），"
-                            + "第 " + contentRiskRecoveries + "/" + MAX_CONTENT_RISK_RECOVERIES
-                            + " 次丢弃历史、以账本重建后继续…"));
-                    String rebuilt = "此前累积的对话历史触发网关内容审核被拦截，已全部丢弃；"
-                            + "以下依据任务原始述求与事实账本继续执行。"
-                            + "\n\n" + rebuild(request, bestAnswer, null);
-                    messages = new ArrayList<>(List.of(
-                            Msg.system(SystemPrompt.withSkills()), Msg.user(rebuilt)));
-                    transcript = new StringBuilder("用户: ").append(rebuilt).append('\n');
-                    continue;
-                }
-                throw e;
-            }
-            long llmMs = (System.nanoTime() - llmStart) / 1_000_000;
-            System.out.println(Console.stat(String.format(
-                    "[本轮统计] LLM %.1fs · 输入 %,d tok（另缓存命中 %,d） · 输出 %,d tok",
-                    llmMs / 1000.0, resp.inputTokens(), resp.cacheReadTokens(), resp.outputTokens())));
-            if (cfg.llm().streaming()) {
-                System.out.println(); // 结束流式文本行
-            } else {
-                printBlocks(resp); // 非流式时统一补打（流式已在接收中实时输出）
-            }
-
-            List<Block.ToolUse> toolCalls = new ArrayList<>();
-            for (Block b : resp.blocks()) {
-                if (b instanceof Block.ToolUse u) {
-                    toolCalls.add(u);
-                }
-            }
+            // ② 分流：响应里没有 tool_use 就是纯文本轮——空响应催促重试 / 即最终结论 / 等待用户 stdin 回复，
+            //    三种去向见 handlePlainText
+            List<Block.ToolUse> toolCalls = toolUses(resp);
             if (toolCalls.isEmpty()) {
-                String candidate = resp.text();
-                // 空响应兜底（网关偶发 200 空流：无文本、无工具、无用量）：既不当作结论也不当作提问，
-                // 注入催促消息进入下一轮——否则任务全完成时空串会被当「最终结论」静默结束
-                if (candidate.isBlank()) {
-                    if (!resp.blocks().isEmpty()) {
-                        messages.add(Msg.assistant(resp.blocks())); // 保住思考块原样回传
-                    }
-                    String nudge = "（上一轮没有文本输出也没有工具调用——请继续执行任务清单："
-                            + "任务已全部完成时立即输出完整最终答案或调用 final_answer 提交，不要停）";
-                    messages.add(Msg.user(nudge));
-                    transcript.append("助手: （空响应）\n用户: ").append(nudge).append('\n');
-                    continue;
+                String conclusion = handlePlainText(state, resp);
+                if (conclusion != null) {
+                    return conclusion; // 任务已全部完成，纯文本即最终结论（不走终答闸门）
                 }
-                // 无工具纯文本：任务已全部完成 → 最终结论，直接返回、不走终答闸门。
-                // 未规划（空任务）或任务未完成 → 视为面向用户的中间陈述（如技能第一步的集中澄清），
-                // 等待用户 stdin 回复后继续（中途提问曾被校验当「不合格答案」打回，故不走 final_answer 闸门）
-                if (!tasks.isEmpty() && tasks.allDone()) {
-                    transcript.append("助手: ").append(candidate).append('\n');
-                    return candidate;
-                }
-                // 任务未完成 → 纯文本视为面向用户的中间陈述（如技能第一步的集中澄清）：
-                // 打印并等待用户 stdin 回复（直接回车=按已入账假设继续），回复进入对话后继续执行，
-                // 不结束运行——「提问」与「终答」不再共用同一条退出路径
-                messages.add(Msg.assistant(resp.blocks()));
-                transcript.append("助手: ").append(candidate).append('\n');
-                System.out.println(Console.header("\n[等待用户回复]") + "（直接回车 = 按默认假设继续执行）");
-                System.out.print("> ");
-                System.out.flush();
-                String line = console.nextLine();
-                String reply = line.isBlank()
-                        ? "（用户未回复。不要再询问，基于事实账本中已入账的假设按默认方案继续执行任务清单。）"
-                        : line;
-                messages.add(Msg.user(reply));
-                transcript.append("用户: ").append(reply).append('\n');
-                continue;
-            }
-            for (Block.ToolUse u : toolCalls) {
-                System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));
+                continue; // 空响应催促已注入或用户回复已入对话，进入下一轮
             }
 
-            // 完整内容块（thinking/text/tool_use）原样追加为 assistant 消息（含思考回传）
-            messages.add(Msg.assistant(resp.blocks()));
-            String text = resp.text();
-            transcript.append("助手: ").append(text.isEmpty() ? "（调用工具）" : text).append('\n');
-            for (Block.ToolUse call : toolCalls) {
-                transcript.append("  [调用工具 ").append(call.name())
-                        .append(" 参数 ").append(call.input()).append("]\n");
+            // ③ 工具轮：完整内容块（thinking/text/tool_use）回传为 assistant 消息后依次执行全部调用，
+            //    结果逐条回传；final_answer 先过终答闸门（BLOCKER 校验 + 账本核对 + 覆盖度），通过即任务完成
+            ToolOutcome outcome = executeToolCalls(state, resp, toolCalls);
+            if (outcome.answer() != null) {
+                return outcome.answer(); // final_answer 终答闸门通过
             }
-
-            // 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传。
-            // 对话稿写入结果正文（截断保数值与链接）：压缩摘要才有数据可保，不再只记「已回传 N 个」
-            boolean finalRejectedThisRound = false; // 终答被拒当轮跳过压缩，缺陷清单留在对话里给模型看
-            long toolsMs = 0; // 工具执行累计耗时（不含终答校验——那是嵌套 LLM 调用，单独计）
-            long gateMs = 0;
-            int ran = 0;
-            for (Block.ToolUse call : toolCalls) {
-                // final_answer 终止闸门：提交的答案先过与纯文本终答同一套校验（VERIFY_PROMPT + 覆盖度），
-                // 通过才真正结束任务；未通过则缺陷清单作为 error 结果回传，模型修正后重新提交
-                if (FinalAnswerTool.NAME.equals(call.name())) {
-                    String answer = ToolRegistry.optStr(call.input(), "answer");
-                    if (answer != null && !answer.isBlank()) {
-                        bestAnswer = answer; // 工具提交的全文同样视为最新完整草稿
-                        long gateStart = System.nanoTime();
-                        String defects = finalGate(answer);
-                        gateMs += (System.nanoTime() - gateStart) / 1_000_000;
-                        pendingFinalDefects = defects; // 通过置 null；被拒保留——压缩重建时最高优先级注入
-                        if (defects == null) {
-                            System.out.println("[final_answer] 校验通过，任务完成");
-                            messages.add(Msg.tool(new Block.ToolResult(call.id(),
-                                    "最终校验通过，答案已采纳，任务完成。", false)));
-                            return answer;
-                        }
-                        finalRejectedThisRound = true;
-                        messages.add(Msg.tool(new Block.ToolResult(call.id(), defects, true)));
-                        transcript.append("  [final_answer 未通过最终校验，缺陷清单已回传]\n");
-                        continue; // 同批其余工具调用照常执行
-                    }
-                    // answer 缺失或为空 → 走正常执行路径，由 registry 返回缺参错误
-                }
-                long toolStart = System.nanoTime();
-                ToolRegistry.ToolOutput out = registry.run(call);
-                toolsMs += (System.nanoTime() - toolStart) / 1_000_000;
-                ran++;
-                // analyze_query 的规划 JSON 与 record_facts 的回执（含覆盖度）完整可见；
-                // load_skill 全文入稿——摘要才能看清流程走到哪一步（正文重注入靠 SkillState，这里只为摘要保真）
-                boolean full = "analyze_query".equals(call.name()) || "record_facts".equals(call.name())
-                        || "load_skill".equals(call.name());
-                String printed = full ? out.content() : preview(out.content());
-                System.out.println("[工具结果] " + printed);
-                messages.add(Msg.tool(new Block.ToolResult(call.id(), out.content(), out.isError())));
-                transcript.append("  [").append(call.name()).append(" 结果] ")
-                        .append(body(out.content())).append('\n');
-            }
-
-            StringBuilder toolStat = new StringBuilder(String.format(
-                    "[本轮统计] 工具 %.1fs（%d 次调用）", toolsMs / 1000.0, ran));
-            if (gateMs > 0) {
-                toolStat.append(String.format(" · 终答校验 %.1fs", gateMs / 1000.0));
-            }
-            System.out.println(Console.stat(toolStat.toString()));
-
-            // 步骤 6：以上次响应输入 token 判断是否压缩（零额外调用）。
-            // 终答被拒的当轮不压缩：缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、
-            // 重建后模型看不到原始清单只能靠猜（后续轮次再压缩时 rebuild 会带上缺陷清单兜底）
-            if (resp.inputTokens() > contextTokenThreshold && !finalRejectedThisRound) {
-                System.out.println("\n[上下文压缩] inputTokens=" + resp.inputTokens()
-                        + " 超过阈值 " + contextTokenThreshold + "，开始压缩…");
-                // 6.2 无工具单次调用总结（直接发原 messages 会因 tool_use 缺 tool_result 报错）
-                String summary = llm.summarize(transcript.toString());
-                System.out.println("[上下文压缩] 摘要:\n" + summary);
-                // 6.3 重建：旧对话与思考全部清除，保留原始述求 + 摘要 + 事实账本 + 旧草稿 + 继续指令（拼装逻辑见 rebuild）。
-                String rebuilt = rebuild(request, bestAnswer, summary);
-                messages = new ArrayList<>(List.of(
-                        Msg.system(SystemPrompt.withSkills()), Msg.user(rebuilt)));
-                transcript = new StringBuilder("用户: ").append(rebuilt).append('\n');
-            }
+            // ④ 超阈值压缩：用上轮响应的 inputTokens 判断（零额外调用）；终答被拒的当轮不压缩——
+            //    缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、模型只能靠猜补缺陷
+            compressIfNeeded(state, request, resp, outcome.finalRejected());
         }
         throw new IllegalStateException("超过最大轮次 " + MAX_ROUNDS + "，任务未完成");
+    }
+
+    /**
+     * LLM 看不到 TaskStore / FactsStore 外部状态 → 每轮重算任务进度与事实账本快照，
+     * 以用户消息追加在对话末尾（只放进本次调用的副本，messages 不留旧快照，天然无陈旧堆积、
+     * 压缩重建也无需处理）。位置决定缓存命运：快照每轮变化，此前插在历史头部会把其后全部内容
+     * 变成缓存 miss；放尾部后 system+历史是逐轮只追加的稳定前缀，AnthropicClient 在倒数第二条
+     * 消息上打的 cache_control 断点逐轮增量命中。账本快照带覆盖缺口，逼模型补齐而非提前收工。
+     */
+    private List<Msg> withTailSnapshots(List<Msg> messages) {
+        String snapshot = tasks.snapshot();
+        String factsSnapshot = facts.snapshot();
+        if (snapshot == null && factsSnapshot == null) {
+            return messages;
+        }
+        if (snapshot != null) {
+            System.out.println(Console.header("[任务快照已注入·尾注] ") + tasks.progress());
+        }
+        if (factsSnapshot != null) {
+            System.out.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
+        }
+        List<Msg> callMessages = new ArrayList<>(messages);
+        if (snapshot != null) {
+            callMessages.add(Msg.user(snapshot));
+        }
+        if (factsSnapshot != null) {
+            callMessages.add(Msg.user(factsSnapshot));
+        }
+        return callMessages;
+    }
+
+    /**
+     * LLM 调用（人格 + 工具元信息 + 对话与思考），打印本轮耗时与 token 统计。
+     * 触发网关内容审核且未超恢复上限时丢弃历史重建上下文，返回 null 表示调用方应直接进入下一轮。
+     */
+    private LlmResponse callLlm(RunState state, String request, List<Msg> callMessages) {
+        long llmStart = System.nanoTime();
+        LlmResponse resp;
+        try {
+            resp = llm.call(registry.definitions(), callMessages);
+            state.contentRiskRecoveries = 0; // 调用成功即清零：只有连续触发才受上限约束
+        } catch (RuntimeException e) {
+            // DeepSeek 系网关输入审核：请求体（累积历史）里某段被判「Content Exists Risk」整次 400。
+            // 重试无意义（内容仍在请求体里），改为丢弃历史、以事实账本重建上下文后进入下一轮。
+            if (state.contentRiskRecoveries < MAX_CONTENT_RISK_RECOVERIES && isContentRisk(e)) {
+                recoverFromContentRisk(state, request);
+                return null;
+            }
+            throw e;
+        }
+        long llmMs = (System.nanoTime() - llmStart) / 1_000_000;
+        System.out.println(Console.stat(String.format(
+                "[本轮统计] LLM %.1fs · 输入 %,d tok（另缓存命中 %,d） · 输出 %,d tok",
+                llmMs / 1000.0, resp.inputTokens(), resp.cacheReadTokens(), resp.outputTokens())));
+        if (cfg.llm().streaming()) {
+            System.out.println(); // 结束流式文本行
+        } else {
+            printBlocks(resp); // 非流式时统一补打（流式已在接收中实时输出）
+        }
+        return resp;
+    }
+
+    /** 网关内容审核恢复：丢弃触发审核的累积历史，以任务原始述求与事实账本重建上下文（不复述被标记的原文）。 */
+    private void recoverFromContentRisk(RunState state, String request) {
+        state.contentRiskRecoveries++;
+        System.out.println(Console.error("\n[内容风险] 输入触发网关内容审核（Content Exists Risk），"
+                + "第 " + state.contentRiskRecoveries + "/" + MAX_CONTENT_RISK_RECOVERIES
+                + " 次丢弃历史、以账本重建后继续…"));
+        String rebuilt = "此前累积的对话历史触发网关内容审核被拦截，已全部丢弃；"
+                + "以下依据任务原始述求与事实账本继续执行。"
+                + "\n\n" + rebuild(request, state.bestAnswer, null);
+        state.reset(rebuilt);
+    }
+
+    /**
+     * 无工具纯文本轮的三种去向：任务已全部完成 → 最终结论，直接返回、不走终答闸门；
+     * 空响应 → 注入催促后重试；未规划（空任务）或任务未完成 → 视为面向用户的中间陈述
+     * （如技能第一步的集中澄清），等待 stdin 回复后继续（中途提问曾被校验当「不合格答案」打回，
+     * 故不走 final_answer 闸门）。返回非 null 表示这就是最终结论；null 表示本轮已处理完毕，进入下一轮。
+     */
+    private String handlePlainText(RunState state, LlmResponse resp) {
+        String candidate = resp.text();
+        if (candidate.isBlank()) {
+            nudgeAfterEmptyResponse(state, resp);
+            return null;
+        }
+        if (!tasks.isEmpty() && tasks.allDone()) {
+            state.transcript.append("助手: ").append(candidate).append('\n');
+            return candidate;
+        }
+        awaitUserReply(state, resp, candidate);
+        return null;
+    }
+
+    /** 空响应兜底（网关偶发 200 空流：无文本、无工具、无用量）：既不当作结论也不当作提问，
+     * 注入催促消息进入下一轮——否则任务全完成时空串会被当「最终结论」静默结束。 */
+    private void nudgeAfterEmptyResponse(RunState state, LlmResponse resp) {
+        if (!resp.blocks().isEmpty()) {
+            state.messages.add(Msg.assistant(resp.blocks())); // 保住思考块原样回传
+        }
+        String nudge = "（上一轮没有文本输出也没有工具调用——请继续执行任务清单："
+                + "任务已全部完成时立即输出完整最终答案或调用 final_answer 提交，不要停）";
+        state.messages.add(Msg.user(nudge));
+        state.transcript.append("助手: （空响应）\n用户: ").append(nudge).append('\n');
+    }
+
+    /** 任务未完成 → 纯文本视为面向用户的中间陈述：打印并等待用户 stdin 回复（直接回车=按已入账假设继续），
+     * 回复进入对话后继续执行，不结束运行——「提问」与「终答」不再共用同一条退出路径。 */
+    private void awaitUserReply(RunState state, LlmResponse resp, String statement) {
+        state.messages.add(Msg.assistant(resp.blocks()));
+        state.transcript.append("助手: ").append(statement).append('\n');
+        System.out.println(Console.header("\n[等待用户回复]") + "（直接回车 = 按默认假设继续执行）");
+        System.out.print("> ");
+        System.out.flush();
+        String line = console.nextLine();
+        String reply = line.isBlank()
+                ? "（用户未回复。不要再询问，基于事实账本中已入账的假设按默认方案继续执行任务清单。）"
+                : line;
+        state.messages.add(Msg.user(reply));
+        state.transcript.append("用户: ").append(reply).append('\n');
+    }
+
+    /** 从响应内容块中收集全部 tool_use 调用。 */
+    private static List<Block.ToolUse> toolUses(LlmResponse resp) {
+        List<Block.ToolUse> toolCalls = new ArrayList<>();
+        for (Block b : resp.blocks()) {
+            if (b instanceof Block.ToolUse u) {
+                toolCalls.add(u);
+            }
+        }
+        return toolCalls;
+    }
+
+    /**
+     * 工具轮主体：完整内容块（thinking/text/tool_use）原样追加为 assistant 消息（含思考回传）→
+     * 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传。对话稿写入结果正文（截断保数值与链接）：
+     * 压缩摘要才有数据可保，不再只记「已回传 N 个」。final_answer 先过终答闸门，通过则答案直接生效。
+     */
+    private ToolOutcome executeToolCalls(RunState state, LlmResponse resp, List<Block.ToolUse> toolCalls) {
+        for (Block.ToolUse u : toolCalls) {
+            System.out.println(Console.tool("[调用工具] " + u.name() + " " + u.input()));
+        }
+        state.messages.add(Msg.assistant(resp.blocks()));
+        appendToolTurn(state.transcript, resp, toolCalls);
+
+        boolean finalRejectedThisRound = false; // 终答被拒当轮跳过压缩，缺陷清单留在对话里给模型看
+        long toolsMs = 0; // 工具执行累计耗时（不含终答校验——那是嵌套 LLM 调用，单独计）
+        long gateMs = 0;
+        int ran = 0;
+        for (Block.ToolUse call : toolCalls) {
+            // final_answer 终止闸门：提交的答案先过与纯文本终答同一套校验（VERIFY_PROMPT + 覆盖度），
+            // 通过才真正结束任务；未通过则缺陷清单作为 error 结果回传，模型修正后重新提交
+            if (FinalAnswerTool.NAME.equals(call.name())) {
+                String answer = ToolRegistry.optStr(call.input(), "answer");
+                if (answer != null && !answer.isBlank()) {
+                    state.bestAnswer = answer; // 工具提交的全文同样视为最新完整草稿
+                    long gateStart = System.nanoTime();
+                    String defects = finalGate(answer);
+                    gateMs += (System.nanoTime() - gateStart) / 1_000_000;
+                    pendingFinalDefects = defects; // 通过置 null；被拒保留——压缩重建时最高优先级注入
+                    if (defects == null) {
+                        System.out.println("[final_answer] 校验通过，任务完成");
+                        state.messages.add(Msg.tool(new Block.ToolResult(call.id(),
+                                "最终校验通过，答案已采纳，任务完成。", false)));
+                        return new ToolOutcome(answer, false);
+                    }
+                    finalRejectedThisRound = true;
+                    state.messages.add(Msg.tool(new Block.ToolResult(call.id(), defects, true)));
+                    state.transcript.append("  [final_answer 未通过最终校验，缺陷清单已回传]\n");
+                    continue; // 同批其余工具调用照常执行
+                }
+                // answer 缺失或为空 → 走正常执行路径，由 registry 返回缺参错误
+            }
+            long toolStart = System.nanoTime();
+            ToolRegistry.ToolOutput out = registry.run(call);
+            toolsMs += (System.nanoTime() - toolStart) / 1_000_000;
+            ran++;
+            // analyze_query 的规划 JSON 与 record_facts 的回执（含覆盖度）完整可见；
+            // load_skill 全文入稿——摘要才能看清流程走到哪一步（正文重注入靠 SkillState，这里只为摘要保真）
+            boolean full = "analyze_query".equals(call.name()) || "record_facts".equals(call.name())
+                    || "load_skill".equals(call.name());
+            String printed = full ? out.content() : preview(out.content());
+            System.out.println("[工具结果] " + printed);
+            state.messages.add(Msg.tool(new Block.ToolResult(call.id(), out.content(), out.isError())));
+            state.transcript.append("  [").append(call.name()).append(" 结果] ")
+                    .append(body(out.content())).append('\n');
+        }
+
+        StringBuilder toolStat = new StringBuilder(String.format(
+                "[本轮统计] 工具 %.1fs（%d 次调用）", toolsMs / 1000.0, ran));
+        if (gateMs > 0) {
+            toolStat.append(String.format(" · 终答校验 %.1fs", gateMs / 1000.0));
+        }
+        System.out.println(Console.stat(toolStat.toString()));
+        return new ToolOutcome(null, finalRejectedThisRound);
+    }
+
+    /** 对话稿记录本轮助手文本与工具调用参数（无文本时记「（调用工具）」占位）。 */
+    private static void appendToolTurn(StringBuilder transcript, LlmResponse resp,
+            List<Block.ToolUse> toolCalls) {
+        String text = resp.text();
+        transcript.append("助手: ").append(text.isEmpty() ? "（调用工具）" : text).append('\n');
+        for (Block.ToolUse call : toolCalls) {
+            transcript.append("  [调用工具 ").append(call.name())
+                    .append(" 参数 ").append(call.input()).append("]\n");
+        }
+    }
+
+    /**
+     * 步骤 6：以上次响应输入 token 判断是否压缩（零额外调用）。
+     * 终答被拒的当轮不压缩：缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、
+     * 重建后模型看不到原始清单只能靠猜（后续轮次再压缩时 rebuild 会带上缺陷清单兜底）。
+     */
+    private void compressIfNeeded(RunState state, String request, LlmResponse resp,
+            boolean finalRejectedThisRound) {
+        if (resp.inputTokens() <= contextTokenThreshold || finalRejectedThisRound) {
+            return;
+        }
+        System.out.println("\n[上下文压缩] inputTokens=" + resp.inputTokens()
+                + " 超过阈值 " + contextTokenThreshold + "，开始压缩…");
+        // 6.2 无工具单次调用总结（直接发原 messages 会因 tool_use 缺 tool_result 报错）
+        String summary = llm.summarize(state.transcript.toString());
+        System.out.println("[上下文压缩] 摘要:\n" + summary);
+        // 6.3 重建：旧对话与思考全部清除，保留原始述求 + 摘要 + 事实账本 + 旧草稿 + 继续指令（拼装逻辑见 rebuild）。
+        state.reset(rebuild(request, state.bestAnswer, summary));
     }
 
     /** 非流式模式下的统一打印：思考与结论文本。 */
@@ -400,5 +474,36 @@ public class Agent {
             }
         }
         return false;
+    }
+
+    /** 单次 run 的跨轮可变状态：对话消息、纯文本对话稿（供压缩摘要）、最完整草稿与内容审核恢复计数。 */
+    private static final class RunState {
+        List<Msg> messages;
+        StringBuilder transcript;
+        /** 当前最完整的交付草稿：校验/压缩围绕它，最终返回的是完整答案而非补丁。 */
+        String bestAnswer;
+        /** 网关内容审核恢复计数（连续触发才累加，成功调用后清零）。 */
+        int contentRiskRecoveries;
+
+        /** 起步上下文：system 人格 + 原始述求；transcript 为 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）。 */
+        static RunState initial(String request) {
+            RunState state = new RunState();
+            state.messages = new ArrayList<>(List.of(
+                    Msg.system(SystemPrompt.withSkills()), Msg.user(request)));
+            state.transcript = new StringBuilder("用户: ").append(request).append('\n');
+            return state;
+        }
+
+        /** 丢弃全部历史与对话稿，以重建后的用户消息重开对话（内容审核恢复与上下文压缩共用）。 */
+        void reset(String userMessage) {
+            messages = new ArrayList<>(List.of(
+                    Msg.system(SystemPrompt.withSkills()), Msg.user(userMessage)));
+            transcript = new StringBuilder("用户: ").append(userMessage).append('\n');
+        }
+    }
+
+    /** 工具轮执行结果：answer 非 null 表示终答闸门已通过、run 应立即返回该答案；
+     * finalRejected 表示终答本轮被拒（当轮不压缩，缺陷清单留在对话里给模型看）。 */
+    private record ToolOutcome(String answer, boolean finalRejected) {
     }
 }
