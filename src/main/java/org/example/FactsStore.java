@@ -111,7 +111,7 @@ public class FactsStore {
         if (isEmpty()) {
             return null;
         }
-        StringBuilder sb = new StringBuilder("# 事实账本快照（系统每轮自动注入，非用户消息）\n");
+        StringBuilder sb = new StringBuilder("# 事实账本快照（每轮自动追加在对话末尾的状态块，非用户消息，不要回复它）\n");
         sb.append(counts()).append("；").append(coverageLine()).append('\n');
         if (!recentChanges.isEmpty()) {
             sb.append("上次快照以来新增/变更:\n");

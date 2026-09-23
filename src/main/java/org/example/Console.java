@@ -9,6 +9,7 @@ package org.example;
  *   <li>黄（33）—— 仅警告</li>
  *   <li>青（36）—— LLM 思考内容</li>
  *   <li>蓝（34）—— 工具调用</li>
+ *   <li>灰（90）—— 轮次耗时与 token 统计（弱化，不与正文抢注意力）</li>
  *   <li>加粗 —— 章节标题（轮次 / 最终结论）</li>
  *   <li>默认 —— 普通正文、工具结果、摘要</li>
  * </ul>
@@ -20,12 +21,13 @@ public final class Console {
 
     private static final boolean ENABLED = colorEnabled();
 
-    private static final String RESET = "[0m";
-    private static final String RED = "[31m";
-    private static final String YELLOW = "[33m";
-    private static final String CYAN = "[36m";
-    private static final String BLUE = "[34m";
-    private static final String BOLD = "[1m";
+    private static final String RESET = "\033[0m";
+    private static final String RED = "\033[31m";
+    private static final String YELLOW = "\033[33m";
+    private static final String CYAN = "\033[36m";
+    private static final String BLUE = "\033[34m";
+    private static final String GRAY = "\033[90m";
+    private static final String BOLD = "\033[1m";
 
     private static boolean colorEnabled() {
         if (System.getenv("NO_COLOR") != null) {
@@ -56,6 +58,11 @@ public final class Console {
     /** 工具调用：蓝色。 */
     public static String tool(String text) {
         return paint(BLUE, text);
+    }
+
+    /** 运行统计（耗时 / token 用量）：灰色弱化。 */
+    public static String stat(String text) {
+        return paint(GRAY, text);
     }
 
     /** 章节标题：加粗。 */

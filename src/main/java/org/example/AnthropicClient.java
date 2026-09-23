@@ -54,9 +54,16 @@ final class AnthropicClient implements LlmClient {
             }
             applyThinking(body);
             if (!system.isBlank()) {
-                body.put("system", system);
+                // system 用块数组形式并打 cache_control 断点（bigmodel 网关已实测支持）：
+                // 人格 + 技能全文跨轮稳定，是第一个缓存段
+                ArrayNode systemBlocks = body.putArray("system");
+                ObjectNode sysBlock = systemBlocks.addObject();
+                sysBlock.put("type", "text").put("text", system);
+                sysBlock.putObject("cache_control").put("type", "ephemeral");
             }
-            body.set("messages", messages(conversation));
+            ArrayNode msgs = messages(conversation);
+            markCacheBreakpoint(msgs);
+            body.set("messages", msgs);
             ArrayNode toolDefs = body.putArray("tools");
             for (ToolDef t : tools) {
                 ObjectNode tool = toolDefs.addObject();
@@ -104,7 +111,8 @@ final class AnthropicClient implements LlmClient {
         }
         return new LlmResponse(blocks,
                 root.path("usage").path("input_tokens").asInt(),
-                root.path("usage").path("output_tokens").asInt());
+                root.path("usage").path("output_tokens").asInt(),
+                root.path("usage").path("cache_read_input_tokens").asLong());
     }
 
     /** 流式：消费 SSE 事件流，边接收边打印增量，边累积成完整 Block。 */
@@ -117,6 +125,7 @@ final class AnthropicClient implements LlmClient {
         List<Block> blocks = new ArrayList<>();
         Map<Integer, ObjectNode> open = new HashMap<>(); // index → 累积中的 content block
         int[] usage = {0, 0};
+        long[] cacheRead = {0}; // 前缀缓存命中 token（message_start 与 message_delta 均可能携带）
         try (Stream<String> lines = resp.body()) {
             lines.filter(line -> line.startsWith("data:")).forEach(line -> {
                 String payload = line.substring(5).strip();
@@ -125,8 +134,10 @@ final class AnthropicClient implements LlmClient {
                 }
                 JsonNode d = parse(payload);
                 switch (d.path("type").asText()) {
-                    case "message_start" ->
-                            usage[0] = d.path("message").path("usage").path("input_tokens").asInt();
+                    case "message_start" -> {
+                        usage[0] = d.path("message").path("usage").path("input_tokens").asInt();
+                        cacheRead[0] = d.path("message").path("usage").path("cache_read_input_tokens").asLong();
+                    }
                     case "content_block_start" ->
                             open.put(d.path("index").asInt(), (ObjectNode) d.get("content_block"));
                     case "content_block_delta" -> accumulate(open.get(d.path("index").asInt()), d.path("delta"));
@@ -136,13 +147,17 @@ final class AnthropicClient implements LlmClient {
                             blocks.add(block(b));
                         }
                     }
-                    case "message_delta" ->
-                            usage[1] = d.path("usage").path("output_tokens").asInt();
+                    case "message_delta" -> {
+                        usage[1] = d.path("usage").path("output_tokens").asInt();
+                        if (d.path("usage").path("cache_read_input_tokens").asLong() > 0) {
+                            cacheRead[0] = d.path("usage").path("cache_read_input_tokens").asLong();
+                        }
+                    }
                     default -> { }
                 }
             });
         }
-        return new LlmResponse(blocks, usage[0], usage[1]);
+        return new LlmResponse(blocks, usage[0], usage[1], cacheRead[0]);
     }
 
     /** 按 delta 类型累积到块上，文本/思考增量同时实时打印。 */
@@ -199,6 +214,36 @@ final class AnthropicClient implements LlmClient {
         }
         flushToolResults(arr, toolResults);
         return arr;
+    }
+
+    /**
+     * 前缀缓存断点：倒数第二条消息的最后一个内容块（bigmodel 网关已实测支持 cache_control 且能命中）。
+     * Agent 每轮把变化的任务/账本快照追加为最后一条消息，倒数第二条即稳定历史的末尾——
+     * 断点打在这里，上一轮写入的缓存段恰好覆盖本轮的稳定前缀，实现逐轮增量命中；
+     * 无尾注快照的单次调用（summarize/verify）同样适用，标记落在正文末块上，无害。
+     * 加上 system 的一处共 2 个断点，远低于协议上限 4。
+     */
+    private static void markCacheBreakpoint(ArrayNode arr) {
+        if (arr.size() < 2) {
+            return;
+        }
+        ObjectNode target = (ObjectNode) arr.get(arr.size() - 2);
+        JsonNode content = target.get("content");
+        if (content == null) {
+            return;
+        }
+        if (content.isTextual()) { // 纯文本 user 消息 → 转块数组再标记
+            ArrayNode blocks = M.createArrayNode();
+            ObjectNode block = blocks.addObject();
+            block.put("type", "text").put("text", content.asText());
+            block.putObject("cache_control").put("type", "ephemeral");
+            target.set("content", blocks);
+        } else if (content.isArray() && !content.isEmpty()) {
+            JsonNode last = content.get(content.size() - 1);
+            if (last instanceof ObjectNode block) {
+                block.putObject("cache_control").put("type", "ephemeral");
+            }
+        }
     }
 
     private static void flushToolResults(ArrayNode arr, List<Block> toolResults) {

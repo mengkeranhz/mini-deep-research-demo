@@ -162,7 +162,7 @@ final class OpenAiClient implements LlmClient {
             blocks.add(new Block.ToolUse(tc.path("id").asText(), tc.path("function").path("name").asText(),
                     args.isBlank() ? M.createObjectNode() : AnthropicClient.parse(args)));
         }
-        return new LlmResponse(blocks, inTok, outTok);
+        return new LlmResponse(blocks, inTok, outTok, 0L);
     }
 
     /** 四种角色 → chat/completions 消息：system/user/assistant/tool（tool 消息带 tool_call_id）。 */

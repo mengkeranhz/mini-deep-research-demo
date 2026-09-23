@@ -109,7 +109,7 @@ public class TaskStore {
             (waiting.isEmpty() ? ready : blocked).add(t.id());
         }
 
-        StringBuilder sb = new StringBuilder("# 任务进度快照（系统每轮自动注入，非用户消息）\n");
+        StringBuilder sb = new StringBuilder("# 任务进度快照（每轮自动追加在对话末尾的状态块，非用户消息，不要回复它）\n");
         if (header != null) {
             if (!header.plan().isBlank()) {
                 sb.append("计划: ").append(header.plan()).append('\n');
@@ -126,6 +126,14 @@ public class TaskStore {
                 .append("，阻塞: ").append(blocked.isEmpty() ? "无" : String.join("、", blocked))
                 .append('\n');
         for (Task t : tasks) {
+            if ("done".equals(t.status())) {
+                // 已完成：一行收口——note 记录了完成要点，无 note 时回退 content 摘要。
+                // 任务全文在 analyze_query 的规划结果里永久可查，后期 10+ 个 done 任务
+                // 逐轮全文注入只是一种每轮重复的固定开销
+                String gist = t.note() != null && !t.note().isBlank() ? t.note() : t.content();
+                sb.append(t.id()).append(" [完成] ").append(truncate(gist, 60)).append('\n');
+                continue;
+            }
             sb.append(t.id()).append(" [").append(label(t.status())).append("] ").append(t.content());
             if (t.note() != null && !t.note().isBlank()) {
                 sb.append(" —— ").append(t.note());
@@ -137,6 +145,11 @@ public class TaskStore {
             sb.append('\n');
         }
         return sb.toString();
+    }
+
+    /** 截断到 max 字符，超出以省略号收尾。 */
+    private static String truncate(String s, int max) {
+        return s.length() <= max ? s : s.substring(0, max) + "…";
     }
 
     private static String label(String status) {

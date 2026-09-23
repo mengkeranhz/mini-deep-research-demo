@@ -9,7 +9,9 @@ import java.util.Scanner;
 
 /**
  * Agent loop（对应方案 7 步）：
- * 轮次上限 → 注入任务进度与事实账本瘦身快照（计数+缺口+新增变更+维度索引）→ LLM（人格 + 工具元信息 + 对话与思考）→
+ * 轮次上限 → 尾注任务进度与事实账本瘦身快照（以用户消息追加在对话末尾——快照每轮变化，插在头部会破坏
+ * 前缀稳定、令整段历史缓存失效；放尾部后 system+历史逐轮只追加，配合 AnthropicClient 的 cache_control
+ * 断点逐轮命中前缀缓存）→ LLM（人格 + 工具元信息 + 对话与思考，逐轮打印耗时与 token 统计）→
  * 无工具纯文本：任务已全部完成（或未规划）时作为结论返回（不触发校验）、任务未完成时视为面向用户的
  * 陈述、等待 stdin 回复后继续；调用 final_answer 提交答案时走终答闸门（BLOCKER 级约束校验 + 账本核对 + 覆盖度检查，
  * 补充性意见不阻塞）→ 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本与
@@ -82,28 +84,30 @@ public class Agent {
             System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
 
             // LLM 看不到 TaskStore / FactsStore 外部状态 → 每轮重算任务进度与事实账本快照，
-            // 作为新系统块注入（人格之后、对话之前）；只放进本次调用的副本，messages 不留旧快照，
-            // 天然无陈旧堆积、压缩重建也无需处理。账本快照带覆盖缺口，逼模型补齐而非提前收工
+            // 以用户消息追加在对话末尾（只放进本次调用的副本，messages 不留旧快照，天然无陈旧堆积、
+            // 压缩重建也无需处理）。位置决定缓存命运：快照每轮变化，此前插在历史头部会把其后全部内容
+            // 变成缓存 miss；放尾部后 system+历史是逐轮只追加的稳定前缀，AnthropicClient 在倒数第二条
+            // 消息上打的 cache_control 断点逐轮增量命中。账本快照带覆盖缺口，逼模型补齐而非提前收工
             String snapshot = tasks.snapshot();
             String factsSnapshot = facts.snapshot();
             List<Msg> callMessages = messages;
             if (snapshot != null || factsSnapshot != null) {
                 if (snapshot != null) {
-                    System.out.println(Console.header("[任务快照已注入] ") + tasks.progress());
+                    System.out.println(Console.header("[任务快照已注入·尾注] ") + tasks.progress());
                 }
                 if (factsSnapshot != null) {
-                    System.out.println(Console.header("[事实账本已注入] ") + facts.coverageLine());
+                    System.out.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
                 }
                 callMessages = new ArrayList<>(messages);
-                int injectAt = 1;
                 if (snapshot != null) {
-                    callMessages.add(injectAt++, Msg.system(snapshot));
+                    callMessages.add(Msg.user(snapshot));
                 }
                 if (factsSnapshot != null) {
-                    callMessages.add(injectAt, Msg.system(factsSnapshot));
+                    callMessages.add(Msg.user(factsSnapshot));
                 }
             }
 
+            long llmStart = System.nanoTime();
             LlmResponse resp;
             try {
                 resp = llm.call(registry.definitions(), callMessages);
@@ -126,6 +130,10 @@ public class Agent {
                 }
                 throw e;
             }
+            long llmMs = (System.nanoTime() - llmStart) / 1_000_000;
+            System.out.println(Console.stat(String.format(
+                    "[本轮统计] LLM %.1fs · 输入 %,d tok（另缓存命中 %,d） · 输出 %,d tok",
+                    llmMs / 1000.0, resp.inputTokens(), resp.cacheReadTokens(), resp.outputTokens())));
             if (cfg.llm().streaming()) {
                 System.out.println(); // 结束流式文本行
             } else {
@@ -184,6 +192,9 @@ public class Agent {
             // 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传。
             // 对话稿写入结果正文（截断保数值与链接）：压缩摘要才有数据可保，不再只记「已回传 N 个」
             boolean finalRejectedThisRound = false; // 终答被拒当轮跳过压缩，缺陷清单留在对话里给模型看
+            long toolsMs = 0; // 工具执行累计耗时（不含终答校验——那是嵌套 LLM 调用，单独计）
+            long gateMs = 0;
+            int ran = 0;
             for (Block.ToolUse call : toolCalls) {
                 // final_answer 终止闸门：提交的答案先过与纯文本终答同一套校验（VERIFY_PROMPT + 覆盖度），
                 // 通过才真正结束任务；未通过则缺陷清单作为 error 结果回传，模型修正后重新提交
@@ -191,7 +202,9 @@ public class Agent {
                     String answer = ToolRegistry.optStr(call.input(), "answer");
                     if (answer != null && !answer.isBlank()) {
                         bestAnswer = answer; // 工具提交的全文同样视为最新完整草稿
+                        long gateStart = System.nanoTime();
                         String defects = finalGate(answer);
+                        gateMs += (System.nanoTime() - gateStart) / 1_000_000;
                         pendingFinalDefects = defects; // 通过置 null；被拒保留——压缩重建时最高优先级注入
                         if (defects == null) {
                             System.out.println("[final_answer] 校验通过，任务完成");
@@ -206,7 +219,10 @@ public class Agent {
                     }
                     // answer 缺失或为空 → 走正常执行路径，由 registry 返回缺参错误
                 }
+                long toolStart = System.nanoTime();
                 ToolRegistry.ToolOutput out = registry.run(call);
+                toolsMs += (System.nanoTime() - toolStart) / 1_000_000;
+                ran++;
                 // analyze_query 的规划 JSON 与 record_facts 的回执（含覆盖度）完整可见；
                 // load_skill 全文入稿——摘要才能看清流程走到哪一步（正文重注入靠 SkillState，这里只为摘要保真）
                 boolean full = "analyze_query".equals(call.name()) || "record_facts".equals(call.name())
@@ -217,6 +233,13 @@ public class Agent {
                 transcript.append("  [").append(call.name()).append(" 结果] ")
                         .append(body(out.content())).append('\n');
             }
+
+            StringBuilder toolStat = new StringBuilder(String.format(
+                    "[本轮统计] 工具 %.1fs（%d 次调用）", toolsMs / 1000.0, ran));
+            if (gateMs > 0) {
+                toolStat.append(String.format(" · 终答校验 %.1fs", gateMs / 1000.0));
+            }
+            System.out.println(Console.stat(toolStat.toString()));
 
             // 步骤 6：以上次响应输入 token 判断是否压缩（零额外调用）。
             // 终答被拒的当轮不压缩：缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、
