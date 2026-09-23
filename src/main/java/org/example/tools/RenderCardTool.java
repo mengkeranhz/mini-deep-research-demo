@@ -44,7 +44,10 @@ public class RenderCardTool implements AgentTool {
 
     @Override
     public ToolDef definition() {
-        return new ToolDef(name(), "把 Markdown 渲染成精美的知识卡片 PNG 图片（调用 md2card API，消耗积分，需联网；"
+        return new ToolDef(name(), "调用门槛：仅当用户本轮明确要求卡片图（如『渲染卡片』『生成知识卡片』『出图卡』"
+                        + "『生成图片版报告/可分享 PNG』）时才调用本工具；用户未明确提出时一律禁止调用，"
+                        + "直接以 Markdown 交付，不主动提议渲染。"
+                        + "把 Markdown 渲染成精美的知识卡片 PNG 图片（调用 md2card API，消耗积分，需联网；"
                         + "服务端超时 60s，首次调用可能较慢）。"
                         + "markdown 中的图片只用可外链的开放图源（unsplash、高德 POI 图 store.is.autonavi.com 均已实测可渲染，pixabay 等开放直链亦可）；"
                         + "pngtree/alamy/shutterstock 等图库站直链会被防盗链拦截，渲染服务端抓不到图会静默丢失"
