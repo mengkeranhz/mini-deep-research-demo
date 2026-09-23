@@ -152,10 +152,26 @@ final class AnthropicClient implements LlmClient {
                         if (d.path("usage").path("cache_read_input_tokens").asLong() > 0) {
                             cacheRead[0] = d.path("usage").path("cache_read_input_tokens").asLong();
                         }
+                        String sr = d.path("delta").path("stop_reason").asText("");
+                        // 异常收尾（max_tokens 截断 / refusal 拒答等）就地亮明，别让它无声滑过
+                        if (!sr.isBlank() && !"end_turn".equals(sr) && !"tool_use".equals(sr)
+                                && !"stop_sequence".equals(sr)) {
+                            System.out.println(Console.warn("[stop_reason] " + sr));
+                        }
                     }
+                    // 网关 200 但流内 error 事件（上游过载/审核/内部错误等）：上抛走重试——
+                    // 此前走 default 被静默丢弃，整条流被当成「成功」的空响应返回
+                    case "error" -> throw new HttpRetry.StreamError("网关流内 error 事件: "
+                            + d.path("error").path("type").asText() + ": "
+                            + d.path("error").path("message").asText());
                     default -> { }
                 }
             });
+        }
+        // 整流无任何内容块且无用量（连 message_start 都没发）＝网关空流：按瞬时故障上抛重试，
+        // 不让 0 blocks / 0 token 的「成功」流混进 Agent 被当空结论
+        if (blocks.isEmpty() && usage[1] == 0 && cacheRead[0] == 0) {
+            throw new HttpRetry.StreamError("流式响应无任何内容块与用量（疑似网关空流）");
         }
         return new LlmResponse(blocks, usage[0], usage[1], cacheRead[0]);
     }

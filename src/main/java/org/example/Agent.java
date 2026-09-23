@@ -148,6 +148,18 @@ public class Agent {
             }
             if (toolCalls.isEmpty()) {
                 String candidate = resp.text();
+                // 空响应兜底（网关偶发 200 空流：无文本、无工具、无用量）：既不当作结论也不当作提问，
+                // 注入催促消息进入下一轮——否则任务全完成时空串会被当「最终结论」静默结束
+                if (candidate.isBlank()) {
+                    if (!resp.blocks().isEmpty()) {
+                        messages.add(Msg.assistant(resp.blocks())); // 保住思考块原样回传
+                    }
+                    String nudge = "（上一轮没有文本输出也没有工具调用——请继续执行任务清单："
+                            + "任务已全部完成时立即输出完整最终答案或调用 final_answer 提交，不要停）";
+                    messages.add(Msg.user(nudge));
+                    transcript.append("助手: （空响应）\n用户: ").append(nudge).append('\n');
+                    continue;
+                }
                 // 无工具纯文本：任务已全部完成 → 最终结论，直接返回、不走终答闸门。
                 // 未规划（空任务）或任务未完成 → 视为面向用户的中间陈述（如技能第一步的集中澄清），
                 // 等待用户 stdin 回复后继续（中途提问曾被校验当「不合格答案」打回，故不走 final_answer 闸门）
@@ -159,19 +171,14 @@ public class Agent {
                 // 打印并等待用户 stdin 回复（直接回车=按已入账假设继续），回复进入对话后继续执行，
                 // 不结束运行——「提问」与「终答」不再共用同一条退出路径
                 messages.add(Msg.assistant(resp.blocks()));
-                transcript.append("助手: ").append(candidate.isEmpty() ? "（中间陈述）" : candidate).append('\n');
-                String reply;
-                if (candidate.isBlank()) {
-                    reply = "（上一轮没有文本输出也没有工具调用——请继续执行任务清单，不要停）";
-                } else {
-                    System.out.println(Console.header("\n[等待用户回复]") + "（直接回车 = 按默认假设继续执行）");
-                    System.out.print("> ");
-                    System.out.flush();
-                    String line = console.nextLine();
-                    reply = line.isBlank()
-                            ? "（用户未回复。不要再询问，基于事实账本中已入账的假设按默认方案继续执行任务清单。）"
-                            : line;
-                }
+                transcript.append("助手: ").append(candidate).append('\n');
+                System.out.println(Console.header("\n[等待用户回复]") + "（直接回车 = 按默认假设继续执行）");
+                System.out.print("> ");
+                System.out.flush();
+                String line = console.nextLine();
+                String reply = line.isBlank()
+                        ? "（用户未回复。不要再询问，基于事实账本中已入账的假设按默认方案继续执行任务清单。）"
+                        : line;
                 messages.add(Msg.user(reply));
                 transcript.append("用户: ").append(reply).append('\n');
                 continue;
