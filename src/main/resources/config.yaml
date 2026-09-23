@@ -10,7 +10,7 @@ llm:
   streaming: true
   # 思考档位：原样透传给网关顶层 reasoning_effort（档位以网关支持为准，如 low/medium/high/max）；
   # off=关闭思考；留空=不发送、走网关默认档
-  thinking: high
+  thinking: max
   # 上下文压缩阈值：上次响应 inputTokens 超过即压缩重建。原则：模型窗口 ~80% 触发，
   # 为当前轮输入与输出预留空间；GLM-5.3 1M(1,048,576)×80% ≈ 838,861
   context-token-threshold: 838861
@@ -24,7 +24,7 @@ tools:
   web-search:
     tavily-api-key: "${TAVILY_API_KEY}"
     # web_search 未显式传 max-results 时的默认返回条数（头部结果已覆盖实际可用的来源）
-    max-results: 10
+    max-results: 30
   lbs-service:
     amap-api-key: "${AMAP_API_KEY}"
     # 相邻两次高德请求的最小间隔（毫秒），防 QPS 超限；个人 key 约 3 QPS → 350ms

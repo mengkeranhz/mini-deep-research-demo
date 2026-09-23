@@ -1,5 +1,6 @@
 package org.example;
 
+import org.example.tools.CurrentTimeTool;
 import org.example.tools.FinalAnswerTool;
 
 import java.nio.charset.StandardCharsets;
@@ -9,7 +10,7 @@ import java.util.Scanner;
 
 /**
  * Agent loop（对应方案 7 步）：
- * 轮次上限 → 尾注任务进度与事实账本瘦身快照（以用户消息追加在对话末尾——快照每轮变化，插在头部会破坏
+ * 轮次上限 → 尾注当前时间与任务进度、事实账本瘦身快照（以用户消息追加在对话末尾——快照每轮变化，插在头部会破坏
  * 前缀稳定、令整段历史缓存失效；放尾部后 system+历史逐轮只追加，配合 AnthropicClient 的 cache_control
  * 断点逐轮命中前缀缓存）→ LLM（人格 + 工具元信息 + 对话与思考，逐轮打印耗时与 token 统计）→
  * 无工具纯文本：任务已全部完成（或未规划）时作为结论返回（不触发校验）、任务未完成时视为面向用户的
@@ -119,27 +120,25 @@ public class Agent {
     /**
      * LLM 看不到 TaskStore / FactsStore 外部状态 → 每轮重算任务进度与事实账本快照，
      * 以用户消息追加在对话末尾（只放进本次调用的副本，messages 不留旧快照，天然无陈旧堆积、
-     * 压缩重建也无需处理）。位置决定缓存命运：快照每轮变化，此前插在历史头部会把其后全部内容
-     * 变成缓存 miss；放尾部后 system+历史是逐轮只追加的稳定前缀，AnthropicClient 在倒数第二条
-     * 消息上打的 cache_control 断点逐轮增量命中。账本快照带覆盖缺口，逼模型补齐而非提前收工。
+     * 压缩重建也无需处理）。当前时间同样每轮尾注注入：时效判断（今天/本周/营业中/节假日）从
+     * 第一轮起就有依据，无需模型自发调用 current_time——无祈使句槽位的工具在 temperature=0 下
+     * 不会被主动调用，且每次调用耗一整个轮次；时间消息放在尾注最前，倒数第二条仍是任务快照，
+     * cache_control 断点目标不变。位置决定缓存命运：快照每轮变化，此前插在历史头部会把其后全部
+     * 内容变成缓存 miss；放尾部后 system+历史是逐轮只追加的稳定前缀，断点逐轮增量命中。
+     * 账本快照带覆盖缺口，逼模型补齐而非提前收工。
      */
     private List<Msg> withTailSnapshots(List<Msg> messages) {
         String snapshot = tasks.snapshot();
         String factsSnapshot = facts.snapshot();
-        if (snapshot == null && factsSnapshot == null) {
-            return messages;
-        }
+        List<Msg> callMessages = new ArrayList<>(messages);
+        callMessages.add(Msg.user("[当前时间·每轮自动追加的状态块，非用户消息，不要回复它] "
+                + CurrentTimeTool.nowText()));
         if (snapshot != null) {
             System.out.println(Console.header("[任务快照已注入·尾注] ") + tasks.progress());
-        }
-        if (factsSnapshot != null) {
-            System.out.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
-        }
-        List<Msg> callMessages = new ArrayList<>(messages);
-        if (snapshot != null) {
             callMessages.add(Msg.user(snapshot));
         }
         if (factsSnapshot != null) {
+            System.out.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
             callMessages.add(Msg.user(factsSnapshot));
         }
         return callMessages;
