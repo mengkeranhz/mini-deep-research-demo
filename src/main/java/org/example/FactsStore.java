@@ -22,6 +22,11 @@ public class FactsStore {
     private final Map<String, List<String>> targets = new LinkedHashMap<>();
     /** 已入账事实：key = dimension|period|metric，同 key 重复入账覆盖旧值。 */
     private final Map<String, Fact> facts = new LinkedHashMap<>();
+    /** 上次快照以来新增/变更的条目（key → 最新值），snapshot() 渲染后清空。 */
+    private final Map<String, Fact> recentChanges = new LinkedHashMap<>();
+
+    /** 单条入账结果：NEW=新格子；UPDATED=同 key 覆盖且有内容变化；UNCHANGED=与现有条目完全相同。 */
+    public enum RecordOutcome { NEW, UPDATED, UNCHANGED }
 
     /** 覆盖目标中尚无事实入账的一个格子（维度×时期），闸门报缺口的最小单位。 */
     private record Cell(String dimension, String period) {}
@@ -40,10 +45,21 @@ public class FactsStore {
         targets.put(dimension.strip(), merged);
     }
 
-    /** 入账一条事实（同 key 覆盖），返回是否新增或更新了内容。 */
-    public boolean record(Fact f) {
-        Fact old = facts.put(key(f.dimension(), f.period(), f.metric()), f);
-        return !f.equals(old);
+    /** 入账一条事实（同 key 覆盖），返回三态结果；新增/变更同时进 recentChanges 供每轮快照展示。 */
+    public RecordOutcome record(Fact f) {
+        String k = key(f.dimension(), f.period(), f.metric());
+        Fact old = facts.get(k);
+        if (old == null) {
+            facts.put(k, f);
+            recentChanges.put(k, f);
+            return RecordOutcome.NEW;
+        }
+        if (f.equals(old)) {
+            return RecordOutcome.UNCHANGED;
+        }
+        facts.put(k, f);
+        recentChanges.put(k, f);
+        return RecordOutcome.UPDATED;
     }
 
     /**
@@ -85,33 +101,42 @@ public class FactsStore {
         return facts.isEmpty() && targets.isEmpty();
     }
 
-    /** 每轮注入的紧凑快照：账本条目 + 覆盖缺口 + 入账提醒。 */
+    /**
+     * 每轮注入的瘦身快照：计数 + 覆盖缺口 + 上次快照以来的新增/变更 + 维度索引。
+     * 不再逐轮注入全部条目数值——账本越大每轮固定开销越大，且诱导模型每轮重审全账本；
+     * 全量账本只在压缩重建（ledger）与终答校验时进入上下文。检索前模型对照维度索引即可
+     * 判断某对象/口径是否已入账；本轮数值看 record_facts 回执与工具结果即可。
+     */
     public String snapshot() {
         if (isEmpty()) {
             return null;
         }
         StringBuilder sb = new StringBuilder("# 事实账本快照（系统每轮自动注入，非用户消息）\n");
-        sb.append(counts()).append('\n');
-        for (Fact f : facts.values()) {
-            sb.append("- [").append(f.dimension()).append("] ").append(f.period());
-            if (!f.metric().isBlank()) {
-                sb.append(" | ").append(f.metric());
+        sb.append(counts()).append("；").append(coverageLine()).append('\n');
+        if (!recentChanges.isEmpty()) {
+            sb.append("上次快照以来新增/变更:\n");
+            for (Fact f : recentChanges.values()) {
+                sb.append("- [").append(f.dimension()).append("] ").append(f.period());
+                if (!f.metric().isBlank()) {
+                    sb.append(" | ").append(f.metric());
+                }
+                sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
+                        .append(" (").append(f.status()).append(")\n");
             }
-            sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
-                    .append(" (").append(f.status()).append(")");
-            if (!f.source().isBlank()) {
-                sb.append(" 来源: ").append(f.source());
-            }
-            if (!f.note().isBlank()) {
-                sb.append("；").append(f.note());
-            }
-            sb.append('\n');
         }
+        sb.append("维度索引（已入账条目按 dimension 汇总；具体数值以 record_facts 回执与终答校验的全量账本为准）:\n");
+        Map<String, Long> byDim = new LinkedHashMap<>();
+        for (Fact f : facts.values()) {
+            byDim.merge(f.dimension(), 1L, Long::sum);
+        }
+        byDim.forEach((d, c) -> sb.append("- ").append(d).append(" ×").append(c).append('\n'));
         List<String> missing = missingPeriods();
         if (!missing.isEmpty()) {
             sb.append("覆盖缺口（目标要求但尚未入账）: ").append(String.join("、", missing)).append('\n');
         }
-        sb.append("提醒: 新检索到的数据立即用 record_facts 入账；最终答案的全部数据必须与账本一致。\n");
+        sb.append("提醒: 检索前先对照维度索引——已入账的对象/口径直接复用，不要重复检索；")
+                .append("新检索到的数据立即用 record_facts 入账；最终答案的全部数据必须与账本一致。\n");
+        recentChanges.clear();
         return sb.toString();
     }
 

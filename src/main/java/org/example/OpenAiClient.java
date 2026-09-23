@@ -42,6 +42,9 @@ final class OpenAiClient implements LlmClient {
                     .put("max_tokens", cfg.maxTokens())
                     .put("temperature", cfg.temperature())
                     .put("stream", cfg.streaming());
+            if (cfg.topP() >= 0) {
+                body.put("top_p", cfg.topP()); // 未配置（<0）不发送，用服务端默认
+            }
             if (cfg.streaming()) {
                 body.putObject("stream_options").put("include_usage", true); // 末尾带 usage
             }

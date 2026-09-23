@@ -34,6 +34,7 @@ public class RecordFactsTool implements AgentTool {
     public ToolDef definition() {
         return new ToolDef(name(), "把检索到的关键数据写入事实账本。每得到一条可用数据就立即入账"
                         + "（不要攒到最后批量补）；最终答案的全部数据必须来自账本。"
+                        + "回执区分新增/覆盖更新/无变化——无变化=数据已在账本，直接复用，不要重复检索。"
                         + "status: found=官方或已交叉核验；proxy=代理指标/第三方折算（note 写折算方法）；"
                         + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。",
                 Map.of("type", "object",
@@ -69,7 +70,9 @@ public class RecordFactsTool implements AgentTool {
         List<String> rejected = new ArrayList<>();
         List<String> offTarget = new ArrayList<>();
         List<String> offDimension = new ArrayList<>();
-        int accepted = 0;
+        int added = 0;
+        int updated = 0;
+        int unchanged = 0;
         for (JsonNode n : arr) {
             String dimension = ToolRegistry.optStr(n, "dimension");
             String period = ToolRegistry.optStr(n, "period");
@@ -87,12 +90,16 @@ public class RecordFactsTool implements AgentTool {
                 rejected.add("[" + dimension + "@" + period + "] not_found 必须在 note 写明已尝试的检索关键词与来源");
                 continue;
             }
-            facts.record(new FactsStore.Fact(dimension, period,
+            // 三态计数：无变化=重复入账既有数据，回执点名提示——给模型即时的「勿重复检索」负反馈
+            switch (facts.record(new FactsStore.Fact(dimension, period,
                     orEmpty(ToolRegistry.optStr(n, "metric")),
                     orEmpty(ToolRegistry.optStr(n, "value")),
                     orEmpty(ToolRegistry.optStr(n, "source")),
-                    status, orEmpty(note)));
-            accepted++;
+                    status, orEmpty(note)))) {
+                case NEW -> added++;
+                case UPDATED -> updated++;
+                case UNCHANGED -> unchanged++;
+            }
             // 两类标签错位提示互斥：dimension 精确命中才校验 period；未命中则查近似目标（对称提示）
             if (!facts.hitsTarget(dimension, period)) {
                 offTarget.add(dimension + "@" + period);
@@ -103,7 +110,13 @@ public class RecordFactsTool implements AgentTool {
                 }
             }
         }
-        StringBuilder sb = new StringBuilder("已入账 ").append(accepted).append(" 条");
+        int accepted = added + updated + unchanged;
+        StringBuilder sb = new StringBuilder("已入账 ").append(accepted).append(" 条（新增 ").append(added)
+                .append("、覆盖更新 ").append(updated).append("、无变化 ").append(unchanged).append("）");
+        if (unchanged > 0) {
+            sb.append("\n提示: ").append(unchanged).append(" 条与账本现有条目完全相同——该数据已在账本，")
+                    .append("直接复用即可，不要为同一数据重复检索或重复入账");
+        }
         if (!rejected.isEmpty()) {
             sb.append("；被拒绝 ").append(rejected.size()).append(" 条:\n").append(String.join("\n", rejected));
         }

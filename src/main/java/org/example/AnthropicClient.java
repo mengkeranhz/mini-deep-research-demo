@@ -20,6 +20,9 @@ import java.util.stream.Stream;
 /**
  * Anthropic 协议实现：POST {base-url}/v1/messages。
  * 流式：逐行读 SSE，按 index 累积 content block（text/thinking 签名/tool_use 的分片 JSON），结束时统一转 Block。
+ * 思考档位（cfg.thinking）原样透传：off/disabled → thinking.type=disabled；其余值发顶层 reasoning_effort
+ * 对应档位（low/medium/high 等，以网关支持为准）；留空不发送、走网关默认档。
+ * 采样参数 top_p 仅在配置 ≥0 时发送（未配置用服务端默认）。
  */
 final class AnthropicClient implements LlmClient {
 
@@ -46,6 +49,10 @@ final class AnthropicClient implements LlmClient {
                     .put("max_tokens", cfg.maxTokens())
                     .put("temperature", cfg.temperature())
                     .put("stream", cfg.streaming());
+            if (cfg.topP() >= 0) {
+                body.put("top_p", cfg.topP()); // 未配置（<0）不发送，用服务端默认
+            }
+            applyThinking(body);
             if (!system.isBlank()) {
                 body.put("system", system);
             }
@@ -68,6 +75,19 @@ final class AnthropicClient implements LlmClient {
         } catch (Exception e) {
             throw new RuntimeException("Anthropic 调用失败: "
                     + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 思考档位直接透传：off/disabled → thinking.type=disabled；其余非空值原样写入顶层
+     * reasoning_effort（档位集合由网关决定，不做白名单与换算）；留空不发送、走网关默认档。
+     */
+    private void applyThinking(ObjectNode body) {
+        String level = cfg.thinking() == null ? "" : cfg.thinking().strip().toLowerCase();
+        if ("off".equals(level) || "disabled".equals(level)) {
+            body.putObject("thinking").put("type", "disabled");
+        } else if (!level.isBlank()) {
+            body.put("reasoning_effort", level);
         }
     }
 

@@ -78,7 +78,8 @@ public class AnalyzeQueryTool implements AgentTool {
         String query = ToolRegistry.str(input, "query");
         // 复用主模型、关闭流式：嵌套调用的增量输出不应打进主循环控制台
         Config.Llm quiet = new Config.Llm(llmCfg.provider(), llmCfg.baseUrl(), llmCfg.model(),
-                llmCfg.apiKey(), llmCfg.maxTokens(), llmCfg.temperature(), false);
+                llmCfg.apiKey(), llmCfg.maxTokens(), llmCfg.temperature(), llmCfg.topP(), false,
+                llmCfg.thinking(), llmCfg.contextTokenThreshold());
         // 重规划时注入当前进度，让新计划基于已掌握信息、仅补齐剩余缺口
         List<Msg> planMsgs = new ArrayList<>();
         planMsgs.add(Msg.system(PROMPT));

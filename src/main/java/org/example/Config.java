@@ -17,8 +17,19 @@ import java.util.regex.Pattern;
  */
 public final class Config {
 
+    /** 上下文压缩阈值缺省：1,048,576（1M 窗口）× 80% ≈ 838,861。 */
+    static final int DEFAULT_CONTEXT_THRESHOLD = 838_861;
+
+    /**
+     * temperature/topP：采样参数（GLM-5.3 推荐 temperature=1、top_p=0.95）；topP<0 表示未配置、不发送。
+     * thinking：思考档位，原样透传给网关（off/disabled=关闭思考，其余值发顶层 reasoning_effort，
+     * 档位集合以网关为准，如 low/medium/high/max）；留空不发送、走网关默认档。
+     * contextTokenThreshold：上下文压缩阈值——上次响应 inputTokens 超过即压缩重建。
+     * 基准：模型窗口的 ~80% 触发，为当前轮输入与输出预留空间（GLM-5.3 1M 窗口 → 1,048,576×80% ≈ 838,861）。
+     */
     public record Llm(String provider, String baseUrl, String model, String apiKey,
-                      int maxTokens, double temperature, boolean streaming) {}
+                      int maxTokens, double temperature, double topP, boolean streaming,
+                      String thinking, int contextTokenThreshold) {}
 
     public record WebSearch(String tavilyApiKey, int maxResults) {}
 
@@ -54,10 +65,13 @@ public final class Config {
                         str(llm, "provider"), str(llm, "base-url"), str(llm, "model"), str(llm, "api-key"),
                         intVal(llm, "max-tokens", 8192),
                         dblVal(llm, "temperature", 0),
-                        boolVal(llm, "streaming", true)),
+                        dblVal(llm, "top-p", -1),
+                        boolVal(llm, "streaming", true),
+                        strBlank(str(llm, "thinking"), "medium"),
+                        intVal(llm, "context-token-threshold", DEFAULT_CONTEXT_THRESHOLD)),
                 new WebSearch(
                         str(webSearch, "tavily-api-key"),
-                        intVal(webSearch, "max-results", 30)),
+                        intVal(webSearch, "max-results", 10)),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
                 new Storage(str(storage, "root-dir")),
                 new ReadFile(intVal(readFile, "max-results", 30)),
@@ -139,6 +153,11 @@ public final class Config {
     private static String str(Map<String, Object> m, String key) {
         Object v = m.get(key);
         return v == null ? "" : String.valueOf(v);
+    }
+
+    /** 取字符串，空白或缺失时用缺省值（档位类配置用）。 */
+    private static String strBlank(String v, String def) {
+        return v == null || v.isBlank() ? def : v.strip().toLowerCase();
     }
 
     private static int intVal(Map<String, Object> m, String key, int def) {

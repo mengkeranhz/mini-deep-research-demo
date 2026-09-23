@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.example.Config;
+import org.example.SearchLog;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
@@ -14,21 +15,27 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/** web_search：Tavily 搜索 API（key 来自 config.yaml 的 tools.web-search；max-results 由 LLM 传参，缺省 30）。
+/** web_search：Tavily 搜索 API（key 来自 config.yaml 的 tools.web-search；max-results 由 LLM 传参，
+ *  缺省取 tools.web-search.max-results，代码缺省 10——头部结果已覆盖实际可用的来源，30 条只会撑爆上下文）。
  *  可选 domains 限定检索域名（映射 include_domains，裸域名匹配自身及全部子域），配合 locate_sources 使用。
  *  可选 include-images（映射 include_images，并固定开 include_image_descriptions 取图片描述）：Tavily 无独立
- *  图片搜索端点，开启后主搜索响应附带查询相关图片，渲染为「图片」清单附在结果列表之后。 */
+ *  图片搜索端点，开启后主搜索响应附带查询相关图片，渲染为「图片」清单附在结果列表之后。
+ *  每次执行记入 SearchLog（检索行为账本），回执末尾附「与已检索查询语义相近」提示，抑制换措辞的重复检索。 */
 public class WebSearchTool implements AgentTool {
 
     private static final ObjectMapper M = new ObjectMapper();
     private static final String API = "https://api.tavily.com/search";
     /** 摘要行的前缀与控制台预览中摘要正文的截短长度（字符）。 */
     private static final String ABSTRACT_PREFIX = "   摘要: ";
+    /** 回执近似提示最多列出的历史查询条数。 */
+    private static final int SIMILAR_LIMIT = 5;
 
     private final Config.WebSearch cfg;
+    private final SearchLog searchLog;
 
-    public WebSearchTool(Config.WebSearch cfg) {
+    public WebSearchTool(Config.WebSearch cfg, SearchLog searchLog) {
         this.cfg = cfg;
+        this.searchLog = searchLog;
     }
 
     @Override
@@ -49,7 +56,7 @@ public class WebSearchTool implements AgentTool {
                                         "description", "搜索关键词，中英文均可"),
                                 "max-results", Map.of(
                                         "type", "integer",
-                                        "description", "返回结果数，默认 30"),
+                                        "description", "返回结果数，默认 10；头部结果通常已覆盖可用来源，非必要不加大"),
                                 "domains", Map.of(
                                         "type", "array",
                                         "items", Map.of("type", "string"),
@@ -66,8 +73,9 @@ public class WebSearchTool implements AgentTool {
             throw new IllegalStateException("未配置 tavily-api-key（config.yaml 的 tools.web-search，对应环境变量 TAVILY_API_KEY）");
         }
         String query = String.join(" ", ToolRegistry.strList(input, "keywords"));
-        int maxResults = ToolRegistry.optInt(input, "max-results", 30);
+        int maxResults = ToolRegistry.optInt(input, "max-results", cfg.maxResults());
         List<String> domains = normalizeDomains(input.get("domains"));
+        List<String> similar = searchLog.similarTo(query, SIMILAR_LIMIT); // 先比对（不含本次），再记录
         boolean includeImages = input.path("include-images").asBoolean(false);
         ObjectNode body = M.createObjectNode();
         body.put("query", query).put("max_results", maxResults);
@@ -94,6 +102,7 @@ public class WebSearchTool implements AgentTool {
                     .append("\n   链接: ").append(r.path("url").asText())
                     .append('\n').append(ABSTRACT_PREFIX).append(r.path("content").asText()).append('\n');
         }
+        searchLog.record(query, domains, n);
         if (n == 0) {
             return domains.isEmpty()
                     ? "未搜到结果，建议更换关键词"
@@ -101,10 +110,17 @@ public class WebSearchTool implements AgentTool {
         }
         String header = "搜索「" + query + "」" + (domains.isEmpty() ? "" : "（限定 " + domains + "）")
                 + "得到 " + n + " 条结果:\n";
-        if (!includeImages) {
-            return header + sb;
+        StringBuilder out = new StringBuilder(header).append(sb);
+        if (includeImages) {
+            out.append(renderImages(root.path("images")));
         }
-        return header + sb + renderImages(root.path("images"));
+        if (!similar.isEmpty()) {
+            out.append("\n提示: 本次查询与已检索过的 ").append(similar.size()).append(" 条语义相近:\n")
+                    .append(String.join("\n", similar))
+                    .append("\n——该目标已检索过：素材已够就 record_facts 入账后直接复用，")
+                    .append("不要换措辞重复检索；确需新信息时才用明显不同的关键词。\n");
+        }
+        return out.toString();
     }
 
     /** include_images 开启时渲染顶层 images 清单；兼容对象项（url/description）与旧版纯 URL 字符串项。 */

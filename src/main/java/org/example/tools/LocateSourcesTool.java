@@ -118,7 +118,8 @@ public class LocateSourcesTool implements AgentTool {
 
         // 一次嵌套判定调用（复用主模型、关流式，嵌套增量输出不打进主循环控制台）；零结果换内部知识兜底变体
         Config.Llm quiet = new Config.Llm(llmCfg.provider(), llmCfg.baseUrl(), llmCfg.model(),
-                llmCfg.apiKey(), llmCfg.maxTokens(), llmCfg.temperature(), false);
+                llmCfg.apiKey(), llmCfg.maxTokens(), llmCfg.temperature(), llmCfg.topP(), false,
+                llmCfg.thinking(), llmCfg.contextTokenThreshold());
         List<Msg> msgs = new ArrayList<>();
         msgs.add(Msg.system(JUDGE_PROMPT));
         msgs.add(Msg.user(query + (hosts.isEmpty()

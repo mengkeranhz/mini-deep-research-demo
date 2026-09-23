@@ -9,27 +9,37 @@ import java.util.Scanner;
 
 /**
  * Agent loop（对应方案 7 步）：
- * 轮次上限 → 注入任务进度与事实账本快照 → LLM（人格 + 工具元信息 + 对话与思考）→
+ * 轮次上限 → 注入任务进度与事实账本瘦身快照（计数+缺口+新增变更+维度索引）→ LLM（人格 + 工具元信息 + 对话与思考）→
  * 无工具纯文本：任务已全部完成（或未规划）时作为结论返回（不触发校验）、任务未完成时视为面向用户的
- * 陈述、等待 stdin 回复后继续；调用 final_answer 提交答案时走终答闸门（约束校验 + 账本核对 + 覆盖度检查）→
- * 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本）。
+ * 陈述、等待 stdin 回复后继续；调用 final_answer 提交答案时走终答闸门（BLOCKER 级约束校验 + 账本核对 + 覆盖度检查，
+ * 补充性意见不阻塞）→ 依次执行工具收集结果（正文写入对话稿）→ 超阈值压缩上下文（重建时携带事实账本与
+ * 已检索清单；终答被拒的当轮不压缩，缺陷清单随后续重建以最高优先级注入，防靠猜补缺陷）。
  */
 public class Agent {
     static final int MAX_ROUNDS = 90;
-    /** 上一次响应 inputTokens 超过该值即触发上下文压缩（演示时可调小）。 */
-    static final int CONTEXT_TOKEN_THRESHOLD = 60_000;
+    /** 上下文压缩阈值（上次响应 inputTokens 超过即压缩）：config.yaml 的 llm.context-token-threshold，
+     * 缺省 838,861 = 1M 窗口 × 80%——接近饱和前主动压缩，为当前轮输入与输出预留空间。 */
+    private final int contextTokenThreshold;
     /** 对话稿中每条工具结果正文的最大保留长度（足够保住数值与链接，又不让稿子膨胀）。 */
     static final int TRANSCRIPT_TOOL_BODY_LIMIT = 1_500;
     /** 网关内容审核（Content Exists Risk）连续触发的最大恢复次数，超过则抛错退出——防账本本身带敏感内容时死循环；成功调用后计数清零。 */
     static final int MAX_CONTENT_RISK_RECOVERIES = 3;
 
-    /** 最终校验器提示词：对照约束、事实账本与覆盖目标检查草稿，通过输出 PASS，否则逐条列缺陷。 */
+    /** 最终校验器提示词：按「够用即可」裁决，只有四类 BLOCKER 能打回；补充性意见归 SUGGESTION 不阻塞。 */
     private static final String VERIFY_PROMPT = """
-            你是答案质量校验器。对照「校验依据」检查「草稿回答」：
-            1. 所有硬约束是否满足；2. 信息缺口是否已说明或给出合理假设；3. 关键事实是否有来源、是否可信；4. 是否仍有未完成、未核实或答非所问之处。
-            5. 与「事实账本」逐条核对：草稿中每个数据、时期与结论是否与已入账事实一致；草稿声称「未找到/未检索到 X」而账本中 X 为 found/proxy，或账本中 X 为 found 而草稿遗漏 X，均为缺陷。
-            6. 账本中 status=not_found 的条目：草稿是否如实说明该缺口；其 note 是否写明已尝试的检索方式（未写明视为放弃过早）。
-            若已满足约束且质量足够，只输出一行 PASS；否则逐条列出缺陷（每行一条，具体、可执行，供后续补救）。
+            你是答案质量校验器，按「够用即可」原则裁决：只有以下四类 BLOCKER 才能判不通过——
+            1. 事实错误：草稿的数据/结论与「事实账本」矛盾，或断言了账本与校验依据都不支撑的确定性事实；
+            2. 账本矛盾/遗漏：草稿声称「未找到/未检索到 X」而账本中 X 为 found/proxy；账本 found 的关键事实被草稿写错或遗漏；
+            3. 硬约束违反：「校验依据」中可判定的硬约束未满足；
+            4. 关键缺口未声明：述求要求的核心内容缺失且草稿未如实说明原因；账本 status=not_found 的条目草稿未如实交代。
+            裁决规则：
+            - 交付形态合法：最终交付物为磁盘文件（如 Markdown 路书）时，「文件路径+摘要+关键结论」是合法答案形态；
+              「答案里没列来源/没贴完整内容/没给样例」不构成缺陷——只要文件内容已按校验依据与账本覆盖即可。
+            - 补充性/展示性意见（可以更详细、可加 Plan B、可补来源清单、措辞可优化、可再交叉验证等）一律不阻塞，最多写入 SUGGESTION。
+            - 没有 BLOCKER 就判 PASS，不追求完美、不主动加码要求。
+            输出格式（严格遵守）：
+            第一行只写 PASS 或 FAIL；FAIL 时另起一行逐条列出 BLOCKER（每行一条：缺陷+依据+可执行的修复动作）；
+            若有非阻塞建议，最后以「SUGGESTION:」起一段列出（无则省略该段）。
             """;
 
     private final Config.Data cfg;
@@ -38,7 +48,10 @@ public class Agent {
     private final ToolRegistry registry;
     private final TaskStore tasks;
     private final FactsStore facts;
+    private final SearchLog searchLog;
     private final SkillState skillState;
+    /** 终答最近一次被拒的缺陷清单：非空时随上下文压缩重建以最高优先级注入（防重建后靠猜补缺陷）。 */
+    private String pendingFinalDefects;
     /** 运行中的用户回复通道：任务未完成时模型向用户提问，从这里读回答。 */
     private final Scanner console = new Scanner(System.in, StandardCharsets.UTF_8);
 
@@ -46,11 +59,14 @@ public class Agent {
         this.cfg = Config.load();
         this.llm = LlmClient.create(cfg.llm());
         this.quietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
-                cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(), false));
+                cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(),
+                cfg.llm().topP(), false, cfg.llm().thinking(), cfg.llm().contextTokenThreshold()));
+        this.contextTokenThreshold = cfg.llm().contextTokenThreshold();
         this.tasks = new TaskStore();
         this.facts = new FactsStore();
+        this.searchLog = new SearchLog();
         this.skillState = new SkillState(); // 会话级生效技能：load_skill 写入，规划注入与压缩重建读取
-        this.registry = new ToolRegistry(cfg, tasks, facts, skillState);
+        this.registry = new ToolRegistry(cfg, tasks, facts, skillState, searchLog);
     }
 
     public String run(String request) {
@@ -167,6 +183,7 @@ public class Agent {
 
             // 依次执行全部工具调用，每个结果作为一条独立的 tool 消息回传。
             // 对话稿写入结果正文（截断保数值与链接）：压缩摘要才有数据可保，不再只记「已回传 N 个」
+            boolean finalRejectedThisRound = false; // 终答被拒当轮跳过压缩，缺陷清单留在对话里给模型看
             for (Block.ToolUse call : toolCalls) {
                 // final_answer 终止闸门：提交的答案先过与纯文本终答同一套校验（VERIFY_PROMPT + 覆盖度），
                 // 通过才真正结束任务；未通过则缺陷清单作为 error 结果回传，模型修正后重新提交
@@ -175,12 +192,14 @@ public class Agent {
                     if (answer != null && !answer.isBlank()) {
                         bestAnswer = answer; // 工具提交的全文同样视为最新完整草稿
                         String defects = finalGate(answer);
+                        pendingFinalDefects = defects; // 通过置 null；被拒保留——压缩重建时最高优先级注入
                         if (defects == null) {
                             System.out.println("[final_answer] 校验通过，任务完成");
                             messages.add(Msg.tool(new Block.ToolResult(call.id(),
                                     "最终校验通过，答案已采纳，任务完成。", false)));
                             return answer;
                         }
+                        finalRejectedThisRound = true;
                         messages.add(Msg.tool(new Block.ToolResult(call.id(), defects, true)));
                         transcript.append("  [final_answer 未通过最终校验，缺陷清单已回传]\n");
                         continue; // 同批其余工具调用照常执行
@@ -199,10 +218,12 @@ public class Agent {
                         .append(body(out.content())).append('\n');
             }
 
-            // 步骤 6：以上次响应输入 token 判断是否压缩（零额外调用）
-            if (resp.inputTokens() > CONTEXT_TOKEN_THRESHOLD) {
+            // 步骤 6：以上次响应输入 token 判断是否压缩（零额外调用）。
+            // 终答被拒的当轮不压缩：缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、
+            // 重建后模型看不到原始清单只能靠猜（后续轮次再压缩时 rebuild 会带上缺陷清单兜底）
+            if (resp.inputTokens() > contextTokenThreshold && !finalRejectedThisRound) {
                 System.out.println("\n[上下文压缩] inputTokens=" + resp.inputTokens()
-                        + " 超过阈值 " + CONTEXT_TOKEN_THRESHOLD + "，开始压缩…");
+                        + " 超过阈值 " + contextTokenThreshold + "，开始压缩…");
                 // 6.2 无工具单次调用总结（直接发原 messages 会因 tool_use 缺 tool_result 报错）
                 String summary = llm.summarize(transcript.toString());
                 System.out.println("[上下文压缩] 摘要:\n" + summary);
@@ -254,11 +275,16 @@ public class Agent {
         String verdict = verify(draft, basis);
         if (!verdict.strip().toUpperCase().startsWith("PASS")) {
             System.out.println("\n[最终校验] 未通过：\n" + verdict);
-            return "回答未通过最终校验，存在以下缺陷：\n" + verdict
-                    + "\n\n请先调用 analyze_query 重新规划（新增的检索目标写入 required_facts），"
-                    + "补齐缺陷后重新提交【完整的最终回答】——不要只输出补丁或缺失部分，"
-                    + "必须覆盖问题要求的全部维度与时期；新检索到的数据先 record_facts 入账再作答，"
-                    + "答案数据一律以事实账本为准。";
+            return "回答未通过最终校验，存在以下 BLOCKER（逐条修复后重新提交【完整的最终回答】，"
+                    + "不要只输出补丁或缺失部分）：\n" + verdict
+                    + "\n\n修复分流——先判断每条缺陷的类型再动手，不要一律重新检索或重新规划："
+                    + "\n1. 数据类（缺数据/数据与账本矛盾）→ 只补检索缺失的数据并 record_facts 入账；"
+                    + "已在账本的数据直接引用，禁止重复检索已入账条目；"
+                    + "\n2. 陈述类（表述/结构/遗漏说明）→ 直接修改答案文本，不需要任何检索；"
+                    + "\n3. 标签错位（覆盖闸门报缺口但数据已检索过）→ 照抄覆盖目标的 dimension/period "
+                    + "字符串重新入账（同 key 覆盖旧值），不重新检索。"
+                    + "\n答案数据一律以事实账本为准；只对修复涉及的部分与账本重新对账（改了哪些就核对哪些），"
+                    + "不必对全文重跑双向对账。";
         }
         System.out.println("[最终校验] 通过");
         // 覆盖度硬闸门：声明的覆盖目标还有格子没入账，或 not_found 声明没写检索方式，
@@ -267,10 +293,12 @@ public class Agent {
         if (gaps != null) {
             System.out.println("\n[覆盖度闸门] 未通过：\n" + gaps);
             return "最终回答前检查发现以下数据覆盖缺口：\n" + gaps
-                    + "\n\n请逐项处理后再重新提交【完整的最终回答】：\n"
-                    + "1. 继续检索（换关键词、换统计口径、换来源）并用 record_facts 入账；\n"
-                    + "2. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
-                    + "3. 确认检索不到的，用 record_facts 声明 status=not_found，"
+                    + "\n\n请逐项处理后再重新提交【完整的最终回答】，先判断缺口类型再选动作：\n"
+                    + "1. 缺口清单已点名「账本中已有疑似条目」的，属标签错位——照抄覆盖目标的 "
+                    + "dimension/period 字符串重新入账即可，不重新检索；\n"
+                    + "2. 确实未检索的，继续检索（换关键词、统计口径、来源）并 record_facts 入账；\n"
+                    + "3. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
+                    + "4. 确认检索不到的，用 record_facts 声明 status=not_found，"
                     + "note 写明已尝试的检索关键词与来源，并在最终答案中如实说明该缺口。";
         }
         System.out.println("[覆盖度闸门] 通过");
@@ -291,14 +319,20 @@ public class Agent {
     }
 
     /**
-     * 压缩 / 内容风险恢复共用：以「原始述求 + 可选进度摘要 + 技能正文 + 事实账本 + 旧草稿」拼出重建后的用户消息文本。
+     * 压缩 / 内容风险恢复共用：以「原始述求 + 可选进度摘要 + 待修缺陷清单 + 技能正文 + 事实账本
+     * + 已检索清单 + 旧草稿」拼出重建后的用户消息文本。
      * summary 传 null 表示无摘要——内容风险恢复不得复述被标记的原文，数据连续性由事实账本保证。
-     * 账本置于草稿之前并声明为最终权威，防止重建后被陈旧草稿锚定。
+     * 缺陷清单置于最前（最高优先级），防重建后模型看不到原始清单只能靠猜；检索清单随后，
+     * 模型据此避免对已检索目标换措辞重查。账本置于草稿之前并声明为最终权威，防止重建后被陈旧草稿锚定。
      */
     private String rebuild(String request, String bestAnswer, String summary) {
         StringBuilder rebuilt = new StringBuilder("原始任务述求：\n").append(request);
         if (summary != null && !summary.isBlank()) {
             rebuilt.append("\n\n之前的执行进度摘要：\n").append(summary);
+        }
+        if (pendingFinalDefects != null && !pendingFinalDefects.isBlank()) {
+            rebuilt.append("\n\n【上次终答被拒的缺陷清单——最高优先级：逐条修复后重新提交完整答案，不要猜测缺陷】\n")
+                    .append(pendingFinalDefects);
         }
         // 已加载技能正文确定性重注入（重水化）：压缩重建的白名单只含技能 name/description，
         // 正文不补回则技能在压缩后失忆——技能是流程状态，不是聊天记录
@@ -313,6 +347,11 @@ public class Agent {
             rebuilt.append("\n\n【事实账本：已检索入账的结构化数据，最终权威依据】\n")
                     .append(ledger)
                     .append("最终答案的全部数据必须与账本一致；摘要或旧草稿与账本冲突时，以账本为准。");
+        }
+        String searches = searchLog.render();
+        if (searches != null) {
+            rebuilt.append("\n\n【已检索清单：本次任务执行过的全部 web_search——语义相同的目标不要再检索，只为空缺 facet 补检索】\n")
+                    .append(searches);
         }
         if (bestAnswer != null && !bestAnswer.isBlank()) {
             rebuilt.append("\n\n【旧答案草稿：仅供结构参考，其中与事实账本冲突或账本已更新的数据必须重写】\n")
