@@ -71,7 +71,7 @@ public final class Config {
                         intVal(llm, "context-token-threshold", DEFAULT_CONTEXT_THRESHOLD)),
                 new WebSearch(
                         str(webSearch, "tavily-api-key"),
-                        intVal(webSearch, "max-results", 10)),
+                        intVal(webSearch, "max-results", 30)),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
                 new Storage(str(storage, "root-dir")),
                 new ReadFile(intVal(readFile, "max-results", 30)),

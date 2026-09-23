@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 /** web_search：Tavily 搜索 API（key 来自 config.yaml 的 tools.web-search；max-results 由 LLM 传参，
- *  缺省取 tools.web-search.max-results，代码缺省 10——头部结果已覆盖实际可用的来源，30 条只会撑爆上下文）。
+ *  缺省取 tools.web-search.max-results，代码缺省 30——多拉结果供素材筛选，Tavily 按查询实际可用数动态返回）。
  *  可选 domains 限定检索域名（映射 include_domains，裸域名匹配自身及全部子域），配合 locate_sources 使用。
  *  可选 include-images（映射 include_images，并固定开 include_image_descriptions 取图片描述）：Tavily 无独立
  *  图片搜索端点，开启后主搜索响应附带查询相关图片，渲染为「图片」清单附在结果列表之后。
@@ -56,7 +56,7 @@ public class WebSearchTool implements AgentTool {
                                         "description", "搜索关键词，中英文均可"),
                                 "max-results", Map.of(
                                         "type", "integer",
-                                        "description", "返回结果数，默认 10；头部结果通常已覆盖可用来源，非必要不加大"),
+                                        "description", "返回结果数，默认 30（实际条数随查询可用结果浮动）"),
                                 "domains", Map.of(
                                         "type", "array",
                                         "items", Map.of("type", "string"),
