@@ -56,8 +56,7 @@ public class FetchUrlTool implements AgentTool {
         int maxLinks = ToolRegistry.optInt(input, "max_links", DEFAULT_MAX_LINKS);
         Http.Response resp = Http.get(url);
         if (resp.status() != 200) {
-            throw new IllegalStateException("HTTP " + resp.status() + " <- " + url
-                    + (resp.status() == 403 ? "（目标站点拒绝访问，多为反爬/需登录，请换来源或改用带 cookie 的请求）" : ""));
+            throw new IllegalStateException("HTTP " + resp.status() + " <- " + url + statusHint(resp.status()));
         }
 
         Path path = savePath == null || savePath.isBlank()
@@ -74,6 +73,23 @@ public class FetchUrlTool implements AgentTool {
         }
         Files.write(path, resp.body());
         return "已保存文件（" + resp.body().length + " 字节，" + resp.contentType() + "）到 " + path;
+    }
+
+    /** RFC 9110 注册的 4xx 码；不在此列的 4xx 多为 WAF 自定义反爬码（如携程 whaleguard 的 432、部分网关的 418）。 */
+    private static final Set<Integer> STANDARD_4XX = Set.of(
+            400, 401, 402, 403, 404, 405, 406, 407, 408, 409,
+            410, 411, 412, 413, 414, 415, 416, 417, 421, 422,
+            423, 424, 425, 426, 428, 429, 431, 451);
+
+    /** 非 200 时附加的引导语，帮模型选恢复动作而非盲目重试同一 URL。 */
+    private static String statusHint(int status) {
+        if (status == 403) {
+            return "（目标站点拒绝访问，多为反爬/需登录：请换来源，或改用 web_search 传 include-raw 从搜索索引取正文）";
+        }
+        if (status >= 400 && status < 500 && !STANDARD_4XX.contains(status)) {
+            return "（非标准状态码，多为站点 WAF 自定义反爬拦截，重试通常无效，请改用 web_search(include-raw) 或换来源）";
+        }
+        return "";
     }
 
     /** save_path 相对路径相对于根目录解析，绝对路径原样使用。 */

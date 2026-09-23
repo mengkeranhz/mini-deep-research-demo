@@ -10,7 +10,12 @@ import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
 
+import java.io.IOException;
+import java.net.URI;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +25,9 @@ import java.util.Map;
  *  可选 domains 限定检索域名（映射 include_domains，裸域名匹配自身及全部子域），配合 locate_sources 使用。
  *  可选 include-images（映射 include_images，并固定开 include_image_descriptions 取图片描述）：Tavily 无独立
  *  图片搜索端点，开启后主搜索响应附带查询相关图片，渲染为「图片」清单附在结果列表之后。
+ *  可选 include-raw（映射 include_raw_content）：索引收录的正文存档到 search/<域名>/ 下，回执逐条附路径
+ *  与字数（不回传正文，避免长文灌爆上下文），配合 read_file 分段阅读——百科/知乎等 fetch_url 抓不到的
+ *  反爬站正文获取通道，配合 site: 或 domains 限定域名。
  *  每次执行记入 SearchLog（检索行为账本），回执末尾附「与已检索查询语义相近」提示，抑制换措辞的重复检索。 */
 public class WebSearchTool implements AgentTool {
 
@@ -32,10 +40,13 @@ public class WebSearchTool implements AgentTool {
 
     private final Config.WebSearch cfg;
     private final SearchLog searchLog;
+    /** include-raw 正文存档根目录（search/ 子目录）。 */
+    private final Path root;
 
-    public WebSearchTool(Config.WebSearch cfg, SearchLog searchLog) {
+    public WebSearchTool(Config.WebSearch cfg, Config.Storage storage, SearchLog searchLog) {
         this.cfg = cfg;
         this.searchLog = searchLog;
+        this.root = Config.rootDir(storage);
     }
 
     @Override
@@ -47,7 +58,9 @@ public class WebSearchTool implements AgentTool {
     public ToolDef definition() {
         return new ToolDef(name(), "联网搜索，返回结果列表（标题/链接/内容摘要）。用于查找资料来源；"
                 + "可用 domains 限定到 locate_sources 定位的权威域名（限定后无结果可去掉重试）；"
-                + "需要图片时传 include-images: true，响应末尾附带查询相关图片（描述+URL）清单。",
+                + "需要图片时传 include-images: true，响应末尾附带查询相关图片（描述+URL）清单；"
+                + "需要正文时传 include-raw: true，索引收录的全文存档到 search/ 目录并逐条给出路径"
+                + "（fetch_url 被反爬拦截的站点如百科/知乎常用此路，可在关键词加 site:域名 限定）",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "keywords", Map.of(
@@ -63,7 +76,11 @@ public class WebSearchTool implements AgentTool {
                                         "description", "限定检索的域名，可选；传裸域名（如 stats.gov.cn），匹配自身及全部子域名"),
                                 "include-images", Map.of(
                                         "type", "boolean",
-                                        "description", "是否在搜索结果中附带查询相关图片，默认 false；开启后响应末尾列出图片（描述+URL）")),
+                                        "description", "是否在搜索结果中附带查询相关图片，默认 false；开启后响应末尾列出图片（描述+URL）"),
+                                "include-raw", Map.of(
+                                        "type", "boolean",
+                                        "description", "是否把索引收录的正文存档到 search/ 目录并在结果中附路径与字数，默认 false；"
+                                                + "适合 fetch_url 抓不到的反爬站点（配合 site: 或 domains），存档用 read_file 分段阅读")),
                         "required", List.of("keywords")));
     }
 
@@ -77,11 +94,16 @@ public class WebSearchTool implements AgentTool {
         List<String> domains = normalizeDomains(input.get("domains"));
         List<String> similar = searchLog.similarTo(query, SIMILAR_LIMIT); // 先比对（不含本次），再记录
         boolean includeImages = input.path("include-images").asBoolean(false);
+        boolean includeRaw = input.path("include-raw").asBoolean(false);
         ObjectNode body = M.createObjectNode();
         body.put("query", query).put("max_results", maxResults);
         if (!domains.isEmpty()) {
             ArrayNode arr = body.putArray("include_domains");
             domains.forEach(arr::add);
+        }
+        if (includeRaw) {
+            // 索引收录的正文随结果返回；只存档不回传，避免长文灌爆上下文
+            body.put("include_raw_content", true);
         }
         if (includeImages) {
             // Tavily 无独立图片端点：主搜索请求带 include_images，响应即附查询相关图片；descriptions 拿图片描述便于识别内容
@@ -94,13 +116,22 @@ public class WebSearchTool implements AgentTool {
             throw new IllegalStateException("HTTP " + resp.status() + " <- Tavily: "
                     + new String(resp.body(), StandardCharsets.UTF_8));
         }
-        JsonNode root = M.readTree(resp.body());
+        JsonNode tree = M.readTree(resp.body());
         StringBuilder sb = new StringBuilder();
         int n = 0;
-        for (JsonNode r : root.path("results")) {
+        int saved = 0;
+        for (JsonNode r : tree.path("results")) {
             sb.append(++n).append(". ").append(r.path("title").asText())
                     .append("\n   链接: ").append(r.path("url").asText())
                     .append('\n').append(ABSTRACT_PREFIX).append(r.path("content").asText()).append('\n');
+            JsonNode rawNode = r.get("raw_content");
+            if (includeRaw && rawNode != null && rawNode.isTextual() && !rawNode.asText().isBlank()) {
+                String raw = rawNode.asText();
+                Path file = saveRaw(r.path("url").asText(), raw);
+                sb.append("   正文: ").append(file).append("（").append(raw.length())
+                        .append(" 字，read_file 分段阅读）\n");
+                saved++;
+            }
         }
         searchLog.record(query, domains, n);
         if (n == 0) {
@@ -112,7 +143,10 @@ public class WebSearchTool implements AgentTool {
                 + "得到 " + n + " 条结果:\n";
         StringBuilder out = new StringBuilder(header).append(sb);
         if (includeImages) {
-            out.append(renderImages(root.path("images")));
+            out.append(renderImages(tree.path("images")));
+        }
+        if (includeRaw && saved == 0) {
+            out.append("\n本次索引未附带任何正文存档：可 fetch_url 直抓原链接，或换更具体的关键词重试\n");
         }
         if (!similar.isEmpty()) {
             out.append("\n提示: 本次查询与已检索过的 ").append(similar.size()).append(" 条语义相近:\n")
@@ -121,6 +155,41 @@ public class WebSearchTool implements AgentTool {
                     .append("不要换措辞重复检索；确需新信息时才用明显不同的关键词。\n");
         }
         return out.toString();
+    }
+
+    /** 索引正文存档：search/&lt;域名&gt;/&lt;URL 路径段拼接&gt;.md，文件名保留中文便于识别；同 URL 重复存档时覆盖。 */
+    private Path saveRaw(String url, String raw) throws IOException {
+        String host = "page";
+        String tail = "page";
+        try {
+            URI u = URI.create(url.strip());
+            if (u.getHost() != null) {
+                host = u.getHost().replaceFirst("^www\\.", "");
+            }
+            List<String> segs = new ArrayList<>();
+            for (String s : u.getPath().split("/")) {
+                if (!s.isBlank()) {
+                    segs.add(URLDecoder.decode(s, StandardCharsets.UTF_8));
+                }
+            }
+            if (!segs.isEmpty()) {
+                tail = String.join("-", segs);
+            }
+        } catch (Exception ignored) {
+            // URL 解析失败按 page 兜底
+        }
+        tail = tail.replaceAll("[^\\p{L}\\p{N}._-]", "_");
+        if (tail.length() > 80) {
+            tail = tail.substring(0, 80);
+        }
+        if (!tail.toLowerCase().endsWith(".md")) {
+            tail += ".md";
+        }
+        Path dir = root.resolve("search").resolve(host);
+        Files.createDirectories(dir);
+        Path p = dir.resolve(tail);
+        Files.writeString(p, raw);
+        return p;
     }
 
     /** include_images 开启时渲染顶层 images 清单；兼容对象项（url/description）与旧版纯 URL 字符串项。 */

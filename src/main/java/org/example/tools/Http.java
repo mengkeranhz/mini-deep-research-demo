@@ -11,8 +11,9 @@ import java.util.Map;
 
 /** JDK HttpClient GET 小工具（字节 / 字符串）。 */
 public final class Http {
-    public static final String USER_AGENT =
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+    /** 诚实 UA：自称浏览器会触发反爬指纹校验（UA 与 JDK HttpClient 的 TLS 指纹不符即拦，如携程 whaleguard 的 432），
+     *  坦白是程序反而放行。 */
+    public static final String USER_AGENT = "Mozilla/5.0 (compatible; mini-deep-research/1.0)";
 
     private static final HttpClient CLIENT = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
