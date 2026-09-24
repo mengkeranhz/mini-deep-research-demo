@@ -31,7 +31,8 @@ public final class Config {
                       int maxTokens, double temperature, double topP, boolean streaming,
                       String thinking, int contextTokenThreshold) {}
 
-    public record WebSearch(String tavilyApiKey, int maxResults) {}
+    /** provider：搜索引擎 tavily / bocha（博查），留空自动选已配 key 的引擎（tavily 优先）。 */
+    public record WebSearch(String provider, String tavilyApiKey, String bochaApiKey, int maxResults) {}
 
     /** minRequestIntervalMs：相邻两次高德请求的最小间隔（毫秒），防 QPS 超限。 */
     public record Lbs(String amapApiKey, int minRequestIntervalMs) {}
@@ -70,7 +71,9 @@ public final class Config {
                         strBlank(str(llm, "thinking"), "medium"),
                         intVal(llm, "context-token-threshold", DEFAULT_CONTEXT_THRESHOLD)),
                 new WebSearch(
+                        str(webSearch, "provider"),
                         str(webSearch, "tavily-api-key"),
+                        str(webSearch, "bocha-api-key"),
                         intVal(webSearch, "max-results", 30)),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
                 new Storage(str(storage, "root-dir")),

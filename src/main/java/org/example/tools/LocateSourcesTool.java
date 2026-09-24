@@ -2,7 +2,6 @@ package org.example.tools;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.example.Config;
 import org.example.LlmClient;
 import org.example.Msg;
@@ -11,7 +10,6 @@ import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -19,7 +17,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * locate_sources：检索前定位权威信息来源。先用发现式搜索词逐个调 Tavily 观测候选域名，
+ * locate_sources：检索前定位权威信息来源。先用发现式搜索词逐个联网检索
+ * （引擎随 tools.web-search.provider 配置，与 web_search 同一 SearchClient）观测候选域名，
  * 再做一次嵌套判定调用（复用主模型、关流式）从真实结果中确认权威域名（source=search）；
  * 结果确无可信权威域名时才凭模型内部知识兜底（source=knowledge）。
  * 完整性校验兜机器保证：source=search 但域名未与任何观测 host 后缀匹配时强制降级为 knowledge。
@@ -28,7 +27,6 @@ import java.util.Map;
 public class LocateSourcesTool implements AgentTool {
 
     private static final ObjectMapper M = new ObjectMapper();
-    private static final String API = "https://api.tavily.com/search";
     /** 观测 host 上限：判定器与完整性校验看到同一份，超出的新 host 不再计入。 */
     private static final int MAX_HOSTS = 60;
     /** 判定输出最多取 5 个域名。 */
@@ -48,11 +46,11 @@ public class LocateSourcesTool implements AgentTool {
             """;
 
     private final Config.Llm llmCfg;
-    private final Config.WebSearch webCfg;
+    private final SearchClient client;
 
     public LocateSourcesTool(Config.Llm llmCfg, Config.WebSearch webCfg) {
         this.llmCfg = llmCfg;
-        this.webCfg = webCfg;
+        this.client = new SearchClient(webCfg);
     }
 
     @Override
@@ -84,9 +82,7 @@ public class LocateSourcesTool implements AgentTool {
         if (keywords.isEmpty()) {
             throw new IllegalArgumentException("keywords 不能为空");
         }
-        if (webCfg.tavilyApiKey().isBlank()) {
-            throw new IllegalStateException("未配置 tavily-api-key（config.yaml 的 tools.web-search，对应环境变量 TAVILY_API_KEY）");
-        }
+        client.requireConfigured();
 
         // 发现式检索：逐关键词容错（单路失败记录后继续）；零结果是兜底触发器，全部异常才是基础设施故障，抛错不掩盖
         LinkedHashMap<String, HostStat> hosts = new LinkedHashMap<>();
@@ -94,18 +90,18 @@ public class LocateSourcesTool implements AgentTool {
         List<String> failures = new ArrayList<>();
         for (String kw : keywords) {
             try {
-                for (JsonNode r : search(kw)) {
-                    String url = r.path("url").asText("");
+                for (SearchClient.Hit r : search(kw)) {
+                    String url = r.url();
                     String h = host(url);
                     if (h == null) {
                         continue; // URL 解析不出 host，跳过该条
                     }
-                    hits.add(new Hit(r.path("title").asText(""), url, h));
+                    hits.add(new Hit(r.title(), url, h));
                     HostStat st = hosts.get(h);
                     if (st != null) {
                         st.count++;
                     } else if (hosts.size() < MAX_HOSTS) {
-                        hosts.put(h, new HostStat(h, r.path("title").asText(""), url));
+                        hosts.put(h, new HostStat(h, r.title(), url));
                     }
                 }
             } catch (Exception e) {
@@ -181,17 +177,9 @@ public class LocateSourcesTool implements AgentTool {
 
     // ---- 检索与判定 ----
 
-    /** 单个发现词调 Tavily，返回 results 数组。 */
-    private JsonNode search(String keywords) throws Exception {
-        ObjectNode body = M.createObjectNode();
-        body.put("query", keywords).put("max_results", 30);
-        Http.Response resp = Http.post(API, Map.of("Authorization", "Bearer " + webCfg.tavilyApiKey()),
-                M.writeValueAsString(body));
-        if (resp.status() != 200) {
-            throw new IllegalStateException("HTTP " + resp.status() + " <- Tavily: "
-                    + new String(resp.body(), StandardCharsets.UTF_8));
-        }
-        return M.readTree(resp.body()).path("results");
+    /** 单个发现词检索（当前配置引擎），返回归一化命中。 */
+    private List<SearchClient.Hit> search(String keywords) throws Exception {
+        return client.search(keywords, 30, List.of(), false, false).hits();
     }
 
     /** 观测清单：host + 出现次数 + 示例标题/链接（判定器的全部输入）。 */

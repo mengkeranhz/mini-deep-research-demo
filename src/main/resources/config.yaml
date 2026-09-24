@@ -22,8 +22,14 @@ storage:
 
 tools:
   web-search:
+    # 搜索引擎：tavily / bocha（博查，https://open.bochaai.com，国内直连、中文检索强）。
+    # 留空自动选已配 key 的引擎（tavily 优先）；两家 key 都配时用 provider 显式指定。
+    # 能力差异：正文存档 include-raw 仅 Tavily 支持；domains 限定两家都支持（博查为客户端过滤）。
+    provider: ""
     tavily-api-key: "${TAVILY_API_KEY}"
-    # web_search 未显式传 max-results 时的默认返回条数（头部结果已覆盖实际可用的来源）
+    # 博查 Web Search API key：open.bochaai.com 登录后「API KEY 管理」创建；也可用环境变量占位 "${BOCHA_API_KEY}"
+    bocha-api-key: "${BOCHA_API_KEY}"
+    # web_search 未显式传 max-results 时的默认返回条数（Tavily 按查询可用结果动态返回，传 30 实测约得 25 条；博查 count 上限 50）
     max-results: 30
   lbs-service:
     amap-api-key: "${AMAP_API_KEY}"
