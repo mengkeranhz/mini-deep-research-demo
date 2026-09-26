@@ -15,6 +15,12 @@
 
 - `analyze_query` 把述求解析为任务清单与**数据覆盖目标**（`required_facts`：维度 × 时期逐格枚举，成为最终答案的覆盖度检查表）；`update_task` 标记进度；发现新信息可再次 `analyze_query` 重新规划（首次规划固化为校验基线，重规划不改变判断基准）
 
+### 顺序子 Agent
+
+- `delegate_agent` 阻塞式运行一个边界清晰的子任务：子 Agent 复用模型与工具配置，但拥有独立任务计划、事实账本、检索日志、技能状态与 `subagents/<agent-id>/` 文件目录
+- 子 Agent 继承父 Agent 的检索日志与当前技能，不能向用户提问，也不能递归调用 `delegate_agent`；默认 60 轮，必须通过自己的 `final_answer` 闸门
+- 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent：同 key 证据不互相覆盖；数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
+
 ### 事实账本
 
 - 每检索到一条关键数据（数值、时期、口径、来源）立即 `record_facts` 入账，状态分 `found`（已核验）/ `proxy`（代理折算）/ `not_found`（缺口声明，须注明已尝试的检索方式）
@@ -35,6 +41,7 @@
 | --- | --- |
 | `analyze_query` | 拆解述求：硬约束 / 信息缺口 / 总体计划 / 带依赖任务清单 / 覆盖目标（JSON） |
 | `update_task` | 更新任务状态（in_progress / done），可附关键结果备注 |
+| `delegate_agent` | 顺序委派一个子 Agent：独立规划、检索、入账与终答，结果按来源 Agent 合并回父 Agent |
 | `locate_sources` | 检索前定位权威来源域名：先发现式搜索观测真实结果，再判定权威域名，供 `web_search` 限定 |
 | `web_search` | Tavily 联网搜索，支持 `domains` 限定到权威域名（含子域名） |
 | `fetch_url` | 抓取 URL 保存到本地：HTML 转 Markdown（标题/段落/链接），PDF/二进制原样保存 |
@@ -96,6 +103,7 @@ Anthropic 协议实现支持流式 SSE 与 thinking 块回传，可替换任意�
 src/main/java/org/example/
 ├── Main.java            # 入口：读入述求，运行 Agent，打印结论
 ├── Agent.java           # Agent 循环 + 终答闸门 + 上下文压缩
+├── DelegateAgentTool.java # 顺序子 Agent 委派与结果合并
 ├── SystemPrompt.java    # 人格提示词（目标 / 准则 / 输出要求 / 边界）
 ├── TaskStore.java       # 任务清单与校验基线（外部状态）
 ├── FactsStore.java      # 事实账本与覆盖目标（外部状态）

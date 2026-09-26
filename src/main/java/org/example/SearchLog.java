@@ -7,15 +7,26 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * 检索日志外部存储：web_search 每次调用记录 query+domains+命中数，与 TaskStore/FactsStore 同理——
+ * 检索日志外部存储：web_search 每次调用记录 query+domains+命中数+来源 Agent，与 TaskStore/FactsStore 同理——
  * LLM 看不到本类状态，近似提示随工具回执给出、全量清单随上下文压缩重建注入。
  * 账本记「事实」，本类记「检索行为」：模型据此判断某目标是否已检索过，避免语义级重复检索
  * （同一对象换措辞的多轮检索是搜索额度的最大浪费源）。
  */
 public class SearchLog {
 
-    /** 单次检索：查询词、限定域名与命中条数。 */
-    public record Entry(String query, List<String> domains, int hits) {}
+    /** 单次检索：查询词、限定域名、命中条数与来源 Agent（父/子合并时不互相覆盖）。 */
+    public record Entry(String query, List<String> domains, int hits, String origin) {
+        public Entry {
+            origin = origin == null || origin.isBlank() ? "parent" : origin.strip();
+        }
+
+        Entry(String query, List<String> domains, int hits) {
+            this(query, domains, hits, "parent");
+        }
+    }
+
+    /** 合并子 Agent 检索日志的结果。 */
+    public record MergeResult(int added, int skipped) {}
 
     /** 关键词集合近似阈值：Jaccard ≥ 0.5 视为同一检索目标（如只差年份/限定词的变体）。 */
     private static final double JACCARD_THRESHOLD = 0.5;
@@ -24,19 +35,54 @@ public class SearchLog {
 
     private final List<Entry> entries = new ArrayList<>();
 
+    public SearchLog() {
+        this("parent");
+    }
+
+    public SearchLog(String origin) {
+        this.origin = origin;
+    }
+
+    private final String origin;
+
     /** 记录一次已执行的检索（hits 为实际命中条数；调用时机在真实请求成功之后）。 */
     public void record(String query, List<String> domains, int hits) {
         if (query == null || query.isBlank()) {
             return;
         }
-        entries.add(new Entry(query.strip(), List.copyOf(domains), hits));
-        if (entries.size() > MAX_ENTRIES) {
-            entries.subList(0, entries.size() - MAX_ENTRIES).clear();
-        }
+        entries.add(new Entry(query.strip(), List.copyOf(domains), hits, origin));
+        trimToLimit();
     }
 
     public boolean isEmpty() {
         return entries.isEmpty();
+    }
+
+    /** 导出快照，供子 Agent 继承父检索历史或合并回父 Agent。 */
+    public List<Entry> entries() {
+        return List.copyOf(entries);
+    }
+
+    /**
+     * 合并另一份检索日志：完全相同的条目跳过；来源 Agent 不同的条目保留。
+     * 因此子 Agent A / B 即使检索同一 query，也会以各自 origin 并存，便于区分与追溯。
+     */
+    public MergeResult merge(List<Entry> incoming) {
+        int added = 0;
+        int skipped = 0;
+        for (Entry e : incoming) {
+            if (e == null || e.query() == null || e.query().isBlank()) {
+                continue;
+            }
+            if (entries.contains(e)) {
+                skipped++;
+            } else {
+                entries.add(e);
+                added++;
+            }
+        }
+        trimToLimit();
+        return new MergeResult(added, skipped);
     }
 
     /**
@@ -67,7 +113,13 @@ public class SearchLog {
 
     private static String format(Entry e) {
         return e.query() + (e.domains().isEmpty() ? "" : "（限定 " + String.join("、", e.domains()) + "）")
-                + " ×命中 " + e.hits();
+                + " ×命中 " + e.hits() + " ×来源 " + e.origin();
+    }
+
+    private void trimToLimit() {
+        if (entries.size() > MAX_ENTRIES) {
+            entries.subList(0, entries.size() - MAX_ENTRIES).clear();
+        }
     }
 
     /** 近似判定：归一化后整串互相包含（只差限定词的变体），或按空白分词的集合 Jaccard ≥ 0.5。 */

@@ -56,6 +56,11 @@ public class ToolRegistry {
         tools.put(tool.name(), tool);
     }
 
+    /** 手动注册自动扫描之外的工具（如仅父 Agent 可用的 delegate_agent）。 */
+    public void registerTool(AgentTool tool) {
+        register(tool);
+    }
+
     public List<ToolDef> definitions() {
         return tools.values().stream().map(AgentTool::definition).toList();
     }

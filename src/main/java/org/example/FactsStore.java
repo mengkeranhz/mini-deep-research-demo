@@ -14,16 +14,37 @@ import java.util.Map;
  */
 public class FactsStore {
 
-    /** 单条事实：status 为 found（官方/已核验）、proxy（代理指标或第三方折算）、not_found（检索未得的缺口声明）。 */
+    /**
+     * 单条事实：status 为 found（官方/已核验）、proxy（代理指标或第三方折算）、not_found（检索未得的缺口声明）。
+     * origin 记录入账来源 Agent；父 / 多个子 Agent 对同一语义 key 的证据可并存，不互相覆盖。
+     */
     public record Fact(String dimension, String period, String metric, String value,
-                       String source, String status, String note) {}
+                       String source, String status, String note, String origin) {
+        public Fact {
+            origin = origin == null || origin.isBlank() ? "parent" : origin.strip();
+        }
+
+        public Fact(String dimension, String period, String metric, String value,
+                    String source, String status, String note) {
+            this(dimension, period, metric, value, source, status, note, "parent");
+        }
+    }
 
     /** 覆盖目标：dimension → 需覆盖的时期列表（analyze_query 声明，重规划可追加）。 */
     private final Map<String, List<String>> targets = new LinkedHashMap<>();
-    /** 已入账事实：key = dimension|period|metric，同 key 重复入账覆盖旧值。 */
+    /** 已入账事实：key = dimension|period|metric|origin，同来源同 key 覆盖，不同来源并存。 */
     private final Map<String, Fact> facts = new LinkedHashMap<>();
     /** 上次快照以来新增/变更的条目（key → 最新值），snapshot() 渲染后清空。 */
     private final Map<String, Fact> recentChanges = new LinkedHashMap<>();
+    private final String origin;
+
+    public FactsStore() {
+        this("parent");
+    }
+
+    public FactsStore(String origin) {
+        this.origin = origin == null || origin.isBlank() ? "parent" : origin.strip();
+    }
 
     /** 单条入账结果：NEW=新格子；UPDATED=同 key 覆盖且有内容变化；UNCHANGED=与现有条目完全相同。 */
     public enum RecordOutcome { NEW, UPDATED, UNCHANGED }
@@ -47,7 +68,8 @@ public class FactsStore {
 
     /** 入账一条事实（同 key 覆盖），返回三态结果；新增/变更同时进 recentChanges 供每轮快照展示。 */
     public RecordOutcome record(Fact f) {
-        String k = key(f.dimension(), f.period(), f.metric());
+        f = "parent".equals(f.origin()) ? withOrigin(f, origin) : f;
+        String k = storageKey(f);
         Fact old = facts.get(k);
         if (old == null) {
             facts.put(k, f);
@@ -60,6 +82,58 @@ public class FactsStore {
         facts.put(k, f);
         recentChanges.put(k, f);
         return RecordOutcome.UPDATED;
+    }
+
+    /** 导出已入账事实快照，供子 Agent 结果合并回父 Agent。 */
+    public List<Fact> facts() {
+        return List.copyOf(facts.values());
+    }
+
+    /** 子 Agent 事实合并结果：冲突与互证均保留来源条目，交由父 Agent / 最终校验裁决。 */
+    public record MergeResult(int added, int updated, int unchanged, int corroborated,
+                              List<String> conflicts) {}
+
+    /**
+     * 合并子 Agent 事实：先给条目打上 childOrigin 标签。
+     * 同一语义 key 下不同 Agent 的条目不覆盖：数值/状态一致记为互证，不一致记为冲突。
+     * 只有同一 childOrigin 重复提交时才允许覆盖，避免子 Agent A / B 彼此吞掉证据。
+     */
+    public MergeResult mergeChild(List<Fact> incoming, String childOrigin) {
+        int added = 0;
+        int updated = 0;
+        int unchanged = 0;
+        int corroborated = 0;
+        List<String> conflicts = new ArrayList<>();
+
+        for (Fact raw : incoming) {
+            Fact f = withOrigin(raw, childOrigin);
+            Fact sameOrigin = findSameOrigin(f);
+            if (sameOrigin != null) {
+                if (sameEvidence(sameOrigin, f)) {
+                    unchanged++;
+                } else {
+                    record(f);
+                    updated++;
+                }
+                continue;
+            }
+
+            List<Fact> existing = facts.values().stream()
+                    .filter(old -> semanticKey(old).equals(semanticKey(f)))
+                    .toList();
+            record(f);
+            added++;
+            if (existing.isEmpty()) {
+                continue;
+            }
+            if (existing.stream().anyMatch(old -> sameValueAndStatus(old, f))) {
+                corroborated++;
+            } else {
+                conflicts.add(conflictMessage(f, existing));
+            }
+        }
+
+        return new MergeResult(added, updated, unchanged, corroborated, conflicts);
     }
 
     /**
@@ -121,7 +195,8 @@ public class FactsStore {
                     sb.append(" | ").append(f.metric());
                 }
                 sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
-                        .append(" (").append(f.status()).append(")\n");
+                        .append(" (").append(f.status()).append("; 来源Agent ")
+                        .append(f.origin()).append(")\n");
             }
         }
         sb.append("维度索引（已入账条目按 dimension 汇总；具体数值以 record_facts 回执与终答校验的全量账本为准）:\n");
@@ -159,7 +234,8 @@ public class FactsStore {
                 sb.append(" | ").append(f.metric());
             }
             sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
-                    .append(" | ").append(f.status());
+                    .append(" | ").append(f.status())
+                    .append(" | 入账Agent: ").append(f.origin());
             if (!f.source().isBlank()) {
                 sb.append(" | 来源: ").append(f.source());
             }
@@ -195,7 +271,39 @@ public class FactsStore {
                         + "：声明未检索到，但未说明已尝试的检索关键词与来源（放弃过早）");
             }
         }
+        String conflicts = evidenceConflicts();
+        if (conflicts != null) {
+            gaps.add(conflicts);
+        }
         return gaps.isEmpty() ? null : String.join("\n", gaps);
+    }
+
+    /** 同一语义事实在多个来源 Agent 间数值/状态不一致时，终答闸门显式要求先裁决。 */
+    private String evidenceConflicts() {
+        Map<String, List<Fact>> bySemantic = new LinkedHashMap<>();
+        for (Fact f : facts.values()) {
+            bySemantic.computeIfAbsent(semanticKey(f), k -> new ArrayList<>()).add(f);
+        }
+
+        List<String> conflicts = new ArrayList<>();
+        for (Map.Entry<String, List<Fact>> entry : bySemantic.entrySet()) {
+            List<Fact> values = entry.getValue();
+            if (values.size() < 2) {
+                continue;
+            }
+            String value = values.get(0).value();
+            String status = values.get(0).status();
+            if (values.stream().allMatch(f -> f.value().equals(value) && f.status().equals(status))) {
+                continue;
+            }
+            List<String> labels = values.stream()
+                    .map(f -> f.origin() + "=" + f.value() + " (" + f.status() + ")")
+                    .toList();
+            conflicts.add("[" + entry.getKey() + "] 多来源 Agent 证据冲突: "
+                    + String.join("；", labels)
+                    + "——终答前必须复核并只采用可靠一方，不能同时采纳矛盾数值");
+        }
+        return conflicts.isEmpty() ? null : String.join("\n", conflicts);
     }
 
     /** 一行覆盖度摘要，如「覆盖 8/10 个目标时期；缺口: GDP增速@2024-Q2、GDP增速@2024-Q3」。 */
@@ -285,6 +393,49 @@ public class FactsStore {
         long other = facts.size() - found - proxy - nf;
         return "已入账 " + facts.size() + " 条（found " + found + "、proxy " + proxy
                 + "、not_found " + nf + (other > 0 ? "、其他 " + other : "") + "）";
+    }
+
+    private static String semanticKey(Fact f) {
+        return key(f.dimension(), f.period(), f.metric());
+    }
+
+    private static String storageKey(Fact f) {
+        return semanticKey(f) + "|" + nz(f.origin());
+    }
+
+    private Fact findSameOrigin(Fact f) {
+        String k = storageKey(f);
+        Fact old = facts.get(k);
+        return old != null && semanticKey(old).equals(semanticKey(f)) ? old : null;
+    }
+
+    private static Fact withOrigin(Fact f, String origin) {
+        return new Fact(f.dimension(), f.period(), f.metric(), f.value(),
+                f.source(), f.status(), f.note(), origin);
+    }
+
+    private static boolean sameEvidence(Fact a, Fact b) {
+        return a.equals(b);
+    }
+
+    private static boolean sameValueAndStatus(Fact a, Fact b) {
+        return a.value().equals(b.value()) && a.status().equals(b.status());
+    }
+
+    private static String conflictMessage(Fact incoming, List<Fact> existing) {
+        String cell = incoming.dimension() + "@" + incoming.period()
+                + (incoming.metric().isBlank() ? "" : "|" + incoming.metric());
+        StringBuilder sb = new StringBuilder(cell + "：");
+        for (int i = 0; i < existing.size(); i++) {
+            Fact old = existing.get(i);
+            if (i > 0) {
+                sb.append("；");
+            }
+            sb.append(old.origin()).append("=").append(old.value()).append(" (").append(old.status()).append(")");
+        }
+        return sb.append("；").append(incoming.origin()).append("=")
+                .append(incoming.value()).append(" (").append(incoming.status()).append(")")
+                .append("——条目已全部保留，请父 Agent 复核后择优采用").toString();
     }
 
     private static String key(String dimension, String period, String metric) {

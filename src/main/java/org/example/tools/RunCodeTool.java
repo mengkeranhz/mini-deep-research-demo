@@ -1,6 +1,7 @@
 package org.example.tools;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.example.Config;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
@@ -18,6 +19,12 @@ import java.util.concurrent.atomic.AtomicReference;
 public class RunCodeTool implements AgentTool {
 
     private static final int MAX_OUTPUT = 6000;
+
+    private final Path root;
+
+    public RunCodeTool(Config.Storage storage) {
+        this.root = Config.rootDir(storage);
+    }
 
     @Override
     public String name() {
@@ -46,6 +53,7 @@ public class RunCodeTool implements AgentTool {
         Files.writeString(file, script);
 
         Process p = new ProcessBuilder("python3", file.toString())
+                .directory(root.toFile())
                 .redirectErrorStream(true) // stdout+stderr 合并，避免管道缓冲死锁
                 .start();
         // 边执行边读取输出，防止输出超过管道缓冲导致进程卡死

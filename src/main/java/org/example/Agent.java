@@ -4,8 +4,10 @@ import org.example.tools.CurrentTimeTool;
 import org.example.tools.FinalAnswerTool;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Scanner;
 
 /**
@@ -19,7 +21,8 @@ import java.util.Scanner;
  * 已检索清单；终答被拒的当轮不压缩，缺陷清单随后续重建以最高优先级注入，防靠猜补缺陷）。
  */
 public class Agent {
-    static final int MAX_ROUNDS = 90;
+    public static final int ROOT_MAX_ROUNDS = 90;
+    public static final int DEFAULT_SUB_AGENT_ROUNDS = 60;
     /** 上下文压缩阈值（上次响应 inputTokens 超过即压缩）：config.yaml 的 llm.context-token-threshold，
      * 缺省 838,861 = 1M 窗口 × 80%——接近饱和前主动压缩，为当前轮输入与输出预留空间。 */
     private final int contextTokenThreshold;
@@ -46,6 +49,10 @@ public class Agent {
             """;
 
     private final Config.Data cfg;
+    private final String agentId;
+    private final boolean rootAgent;
+    private final int maxRounds;
+    private final String systemPrompt;
     private final LlmClient llm;
     private final LlmClient quietLlm; // 无工具、非流式：最终校验等嵌套调用用
     private final ToolRegistry registry;
@@ -56,20 +63,57 @@ public class Agent {
     /** 终答最近一次被拒的缺陷清单：非空时随上下文压缩重建以最高优先级注入（防重建后靠猜补缺陷）。 */
     private String pendingFinalDefects;
     /** 运行中的用户回复通道：任务未完成时模型向用户提问，从这里读回答。 */
-    private final Scanner console = new Scanner(System.in, StandardCharsets.UTF_8);
+    private final Scanner console;
 
     public Agent() {
-        this.cfg = Config.load();
+        this(Config.load(), "root", true, ROOT_MAX_ROUNDS);
+    }
+
+    private Agent(Config.Data cfg, String agentId, boolean rootAgent, int maxRounds) {
+        this.cfg = cfg;
+        this.agentId = agentId;
+        this.rootAgent = rootAgent;
+        this.maxRounds = maxRounds;
+        this.systemPrompt = rootAgent
+                ? SystemPrompt.withSkills()
+                : SystemPrompt.subAgentWithSkills();
         this.llm = LlmClient.create(cfg.llm());
         this.quietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
                 cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(),
                 cfg.llm().topP(), false, cfg.llm().thinking(), cfg.llm().contextTokenThreshold()));
         this.contextTokenThreshold = cfg.llm().contextTokenThreshold();
         this.tasks = new TaskStore();
-        this.facts = new FactsStore();
-        this.searchLog = new SearchLog();
+        this.facts = new FactsStore(agentId);
+        this.searchLog = new SearchLog(agentId);
         this.skillState = new SkillState(); // 会话级生效技能：load_skill 写入，规划注入与压缩重建读取
         this.registry = new ToolRegistry(cfg, tasks, facts, skillState, searchLog);
+        this.console = rootAgent ? new Scanner(System.in, StandardCharsets.UTF_8) : null;
+
+        // delegate_agent 放在 org.example 包，不会被自动扫描；只注册给父 Agent，防止子 Agent 递归委派。
+        if (rootAgent) {
+            registry.registerTool(new DelegateAgentTool(cfg, facts, searchLog, skillState));
+        }
+    }
+
+    /**
+     * 创建子 Agent：复用模型与工具配置，但拥有独立状态与文件目录；
+     * 继承父检索历史与当前技能，接收父任务指定的精确覆盖目标。
+     */
+    static Agent createSubAgent(Config.Data parentCfg, String agentId, Path workspace,
+                                List<SearchLog.Entry> seedSearches, Skill inheritedSkill,
+                                Map<String, List<String>> requiredFacts, int maxRounds) {
+        Config.Data childCfg = new Config.Data(
+                parentCfg.llm(), parentCfg.webSearch(), parentCfg.lbs(),
+                new Config.Storage(workspace.toAbsolutePath().normalize().toString()),
+                parentCfg.readFile(), parentCfg.renderCard());
+
+        Agent child = new Agent(childCfg, agentId, false, maxRounds);
+        child.searchLog.merge(seedSearches);
+        if (inheritedSkill != null) {
+            child.skillState.set(inheritedSkill); // 只初始化子 Agent 自己的 SkillState，不反向修改父 Agent
+        }
+        requiredFacts.forEach(child.facts::require);
+        return child;
     }
 
     /**
@@ -81,9 +125,10 @@ public class Agent {
     public String run(String request) {
         // 跨轮可变状态：对话消息、纯文本对话稿（供压缩摘要）、最完整草稿、内容审核恢复计数；
         // 内容审核恢复与压缩重建时整体 reset 重开对话，而非在旧历史上追加
-        RunState state = RunState.initial(request);
-        for (int round = 1; round <= MAX_ROUNDS; round++) {
-            System.out.println("\n" + Console.header("======== 第 " + round + "/" + MAX_ROUNDS + " 轮 ========"));
+        RunState state = RunState.initial(request, systemPrompt);
+        for (int round = 1; round <= maxRounds; round++) {
+            System.out.println("\n" + Console.header("======== " + (rootAgent ? "" : "[子Agent " + agentId + "] ")
+                    + "第 " + round + "/" + maxRounds + " 轮 ========"));
 
             // ① LLM 调用（带尾注快照）：任务进度与事实账本以用户消息追加在本次调用副本的末尾——
             //    快照每轮变化，放头部会破坏前缀缓存，放尾部则 system+历史逐轮只追加（详见 withTailSnapshots）。
@@ -114,7 +159,21 @@ public class Agent {
             //    缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、模型只能靠猜补缺陷
             compressIfNeeded(state, request, resp, outcome.finalRejected());
         }
-        throw new IllegalStateException("超过最大轮次 " + MAX_ROUNDS + "，任务未完成");
+        throw new IllegalStateException((rootAgent ? "Agent" : "子Agent " + agentId)
+                + " 超过最大轮次 " + maxRounds + "，任务未完成");
+    }
+
+    /** 子 Agent 运行结果：最终报告与待合并的外部状态快照。 */
+    record SubAgentResult(String answer, List<FactsStore.Fact> facts,
+                          List<SearchLog.Entry> searches) {}
+
+    /** 以子 Agent 身份运行；纯文本不会结束，必须通过 final_answer 闸门。 */
+    SubAgentResult runAsSubAgent(String request) {
+        if (rootAgent) {
+            throw new IllegalStateException("runAsSubAgent 只允许子 Agent 调用");
+        }
+        String answer = run(request);
+        return new SubAgentResult(answer, facts.facts(), searchLog.entries());
     }
 
     /**
@@ -184,7 +243,7 @@ public class Agent {
         String rebuilt = "此前累积的对话历史触发网关内容审核被拦截，已全部丢弃；"
                 + "以下依据任务原始述求与事实账本继续执行。"
                 + "\n\n" + rebuild(request, state.bestAnswer, null);
-        state.reset(rebuilt);
+        state.reset(rebuilt, systemPrompt);
     }
 
     /**
@@ -197,6 +256,18 @@ public class Agent {
         String candidate = resp.text();
         if (candidate.isBlank()) {
             nudgeAfterEmptyResponse(state, resp);
+            return null;
+        }
+        if (!rootAgent) {
+            state.messages.add(Msg.assistant(resp.blocks()));
+            state.transcript.append("助手: ").append(candidate).append('\n');
+            String instruction = """
+                    子 Agent 不能以纯文本结束任务，也不能向用户提问。
+                    请基于事实账本继续执行；需要假设时在最终答案中明确说明。
+                    任务完成后必须调用 final_answer 提交完整子任务报告。
+                    """;
+            state.messages.add(Msg.user(instruction));
+            state.transcript.append("用户: ").append(instruction).append('\n');
             return null;
         }
         if (!tasks.isEmpty() && tasks.allDone()) {
@@ -337,7 +408,7 @@ public class Agent {
         String summary = llm.summarize(state.transcript.toString());
         System.out.println("[上下文压缩] 摘要:\n" + summary);
         // 6.3 重建：旧对话与思考全部清除，保留原始述求 + 摘要 + 事实账本 + 旧草稿 + 继续指令（拼装逻辑见 rebuild）。
-        state.reset(rebuild(request, state.bestAnswer, summary));
+        state.reset(rebuild(request, state.bestAnswer, summary), systemPrompt);
     }
 
     /** 非流式模式下的统一打印：思考与结论文本。 */
@@ -485,18 +556,18 @@ public class Agent {
         int contentRiskRecoveries;
 
         /** 起步上下文：system 人格 + 原始述求；transcript 为 6.1 用：剔除 tool_result 的纯文本对话稿（边执行边累积）。 */
-        static RunState initial(String request) {
+        static RunState initial(String request, String systemPrompt) {
             RunState state = new RunState();
             state.messages = new ArrayList<>(List.of(
-                    Msg.system(SystemPrompt.withSkills()), Msg.user(request)));
+                    Msg.system(systemPrompt), Msg.user(request)));
             state.transcript = new StringBuilder("用户: ").append(request).append('\n');
             return state;
         }
 
         /** 丢弃全部历史与对话稿，以重建后的用户消息重开对话（内容审核恢复与上下文压缩共用）。 */
-        void reset(String userMessage) {
+        void reset(String userMessage, String systemPrompt) {
             messages = new ArrayList<>(List.of(
-                    Msg.system(SystemPrompt.withSkills()), Msg.user(userMessage)));
+                    Msg.system(systemPrompt), Msg.user(userMessage)));
             transcript = new StringBuilder("用户: ").append(userMessage).append('\n');
         }
     }
