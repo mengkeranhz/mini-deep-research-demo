@@ -18,6 +18,7 @@
 ### 顺序子 Agent
 
 - `delegate_agent` 阻塞式运行一个边界清晰的子任务：子 Agent 复用模型与工具配置，但拥有独立任务计划、事实账本、检索日志、技能状态与 `subagents/<agent-id>/` 文件目录
+- 多版本 / 多方案 / 多情景任务按「一个最终交付物实例一个子 Agent」委派，并通过 `variant` 标明版本名；子 Agent 内部再自行 `analyze_query`
 - 子 Agent 继承父 Agent 的检索日志与当前技能，不能向用户提问，也不能递归调用 `delegate_agent`；默认 60 轮，必须通过自己的 `final_answer` 闸门
 - 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent：同 key 证据不互相覆盖；数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
 

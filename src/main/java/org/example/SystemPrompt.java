@@ -52,6 +52,13 @@ public final class SystemPrompt {
             - 负责面向用户澄清、整体规划、任务拆分、子任务委派与最终汇总。
             - 边界清晰且需要独立检索或多轮执行的子任务，可调用 delegate_agent 交给子 Agent；调用前先把对应父任务标为 in_progress，
               收到结果后检查报告、事实合并与冲突，再决定是否 update_task 为 done。简单事实查询不要委派。
+            - 子 Agent 的第一拆分维度是「独立交付物 / 方案实例」。用户要求多个并列版本、方案或情景时，
+              必须一个版本一个子 Agent，并在 delegate_agent 的 variant 中标明版本名；
+              每个子 Agent 内部再自行 analyze_query、检索、入账、规划与 final_answer。
+            - 多版本任务中，父 Agent 在委派前只提取共同硬约束、版本定义、评价标准和版本级 required_facts；
+              不要预先推演某一版本的具体细节。版本内方案设计由对应子 Agent独立完成，
+              父 Agent 最后只做合并、冲突复核、横向对比与最终汇总。
+            - 多版本任务的父级 required_facts 必须按版本前缀区分，避免一版数据被误认为已覆盖另一版。
 
             # 边界
             - 不伪造工具调用或工具结果。

@@ -41,6 +41,8 @@ public class AnalyzeQueryTool implements AgentTool {
               季度指标逐年逐季列出（如 ["2024","2024-Q1","2024-Q2","2024-Q3","2024-Q4",...]），
               年度指标只列年份；非时间序列数据用自然时期（如 ["国庆假期"]）。
             - tasks: 3-6 个可执行任务，每项 {"content": "一次工具调用可完成的动作", "depends_on": [前置任务的序号，从 1 起]}
+            - 多版本规则：若述求要求多个并列版本 / 方案 / 情景，tasks 必须以「每个版本一份完整交付物」为第一拆分维度，
+              至少为每个版本安排一个独立方案任务；required_facts 的 dimension 也须带版本前缀。
             示例（输入「查深圳最近2年每季度的GDP增速和新能源汽车保有量」）：
             {"constraints":["地区：深圳","时间范围：最近2年","频率：季度"],"unknowns":["新能源汽车保有量是否只按年度发布"],"plan":"先确认各指标发布频率与口径，再按各自粒度检索","required_facts":[{"dimension":"GDP增速","periods":["2024","2024-Q1","2024-Q2","2024-Q3","2024-Q4","2025","2025-Q1","2025-Q2","2025-Q3","2025-Q4"]},{"dimension":"新能源汽车保有量","periods":["2024","2025"]}],"tasks":[{"content":"查深圳GDP季度增速官方数据","depends_on":[]},{"content":"查深圳新能源汽车保有量年度数据","depends_on":[]},{"content":"汇总对比两项指标变化","depends_on":[1,2]}]}
             """;
@@ -90,6 +92,8 @@ public class AnalyzeQueryTool implements AgentTool {
             planMsgs.add(Msg.system("用户述求已命中技能「" + skill.name() + "」，其完整工作流程如下，规划必须遵循：\n"
                     + "- tasks 按该流程的步骤拆解：每步一个任务、相邻步骤可合并，不受 3-6 个限制；"
                     + "每个任务的 content 以「第X步：」开头并内联该步关键纪律，保证仅凭任务清单即可继续执行。\n"
+                    + "- 例外：若述求包含多个并列版本 / 方案 / 情景，父级 tasks 必须先按版本拆分，一个版本一个完整交付任务；"
+                    + "技能流程在该版本任务内部执。\n"
                     + "- required_facts 的 dimension/period 按技能约定的命名式声明（后续入账逐字照抄）。\n\n"
                     + skill.instructions()));
         }
