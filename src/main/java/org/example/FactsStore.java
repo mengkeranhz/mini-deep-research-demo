@@ -19,14 +19,21 @@ public class FactsStore {
      * origin 记录入账来源 Agent；父 / 多个子 Agent 对同一语义 key 的证据可并存，不互相覆盖。
      */
     public record Fact(String dimension, String period, String metric, String value,
-                       String source, String status, String note, String origin) {
+                       String source, String status, String note, String origin,
+                       boolean critical) {
         public Fact {
+            dimension = canonicalDimension(dimension);
             origin = origin == null || origin.isBlank() ? "parent" : origin.strip();
         }
 
         public Fact(String dimension, String period, String metric, String value,
                     String source, String status, String note) {
-            this(dimension, period, metric, value, source, status, note, "parent");
+            this(dimension, period, metric, value, source, status, note, "parent", false);
+        }
+
+        public Fact(String dimension, String period, String metric, String value,
+                    String source, String status, String note, String origin) {
+            this(dimension, period, metric, value, source, status, note, origin, false);
         }
     }
 
@@ -36,6 +43,8 @@ public class FactsStore {
     private final Map<String, Fact> facts = new LinkedHashMap<>();
     /** 上次快照以来新增/变更的条目（key → 最新值），snapshot() 渲染后清空。 */
     private final Map<String, Fact> recentChanges = new LinkedHashMap<>();
+    /** 父 Agent 传下的只读事实：参与快照/终检，但不会被子 Agent 再合并回父级。 */
+    private final List<Fact> inheritedFacts = new ArrayList<>();
     private final String origin;
 
     public FactsStore() {
@@ -57,13 +66,37 @@ public class FactsStore {
         if (dimension == null || dimension.isBlank()) {
             return;
         }
-        List<String> merged = new ArrayList<>(targets.getOrDefault(dimension.strip(), List.of()));
+        String dim = canonicalDimension(dimension);
+        List<String> merged = new ArrayList<>(targets.getOrDefault(dim, List.of()));
         for (String p : periods) {
             if (p != null && !p.isBlank() && !merged.contains(p.strip())) {
                 merged.add(p.strip());
             }
         }
-        targets.put(dimension.strip(), merged);
+        targets.put(dim, merged);
+    }
+
+    /** 统一「版本名：指标」/「版本名·指标」等手写变体，覆盖目标与入账使用同一 canonical key。 */
+    public static String canonicalDimension(String dimension) {
+        if (dimension == null || dimension.isBlank()) {
+            return dimension == null ? "" : dimension.strip();
+        }
+        String d = dimension.strip();
+        int i = d.indexOf('：');
+        int ascii = d.indexOf(':');
+        if (ascii >= 0 && (i < 0 || ascii < i)) {
+            i = ascii;
+        }
+        return i > 0 && i < d.length() - 1 ? d.substring(0, i) + "·" + d.substring(i + 1).strip() : d;
+    }
+
+    /** 子 Agent 建立时继承父账本；这些条本只读，不参与子 Agent 结果回传。 */
+    public void inherit(List<Fact> incoming) {
+        if (incoming == null) {
+            return;
+        }
+        incoming.forEach(f -> inheritedFacts.add(new Fact(f.dimension(), f.period(), f.metric(),
+                f.value(), f.source(), f.status(), f.note(), f.origin(), f.critical())));
     }
 
     /** 入账一条事实（同 key 覆盖），返回三态结果；新增/变更同时进 recentChanges 供每轮快照展示。 */
@@ -145,7 +178,7 @@ public class FactsStore {
         if (dimension == null || period == null) {
             return true;
         }
-        List<String> ps = targets.get(dimension.strip());
+        List<String> ps = targets.get(canonicalDimension(dimension));
         return ps == null || ps.contains(period.strip());
     }
 
@@ -159,7 +192,7 @@ public class FactsStore {
             return List.of();
         }
         List<String> near = new ArrayList<>();
-        String dim = dimension.strip();
+        String dim = canonicalDimension(dimension);
         for (String t : targets.keySet()) {
             if (!t.equals(dim) && nearDim(t, dimension) && !near.contains(t)) {
                 near.add(t);
@@ -172,7 +205,7 @@ public class FactsStore {
     }
 
     public boolean isEmpty() {
-        return facts.isEmpty() && targets.isEmpty();
+        return facts.isEmpty() && inheritedFacts.isEmpty() && targets.isEmpty();
     }
 
     /**
@@ -201,7 +234,7 @@ public class FactsStore {
         }
         sb.append("维度索引（已入账条目按 dimension 汇总；具体数值以 record_facts 回执与终答校验的全量账本为准）:\n");
         Map<String, Long> byDim = new LinkedHashMap<>();
-        for (Fact f : facts.values()) {
+        for (Fact f : allFacts()) {
             byDim.merge(f.dimension(), 1L, Long::sum);
         }
         byDim.forEach((d, c) -> sb.append("- ").append(d).append(" ×").append(c).append('\n'));
@@ -228,7 +261,7 @@ public class FactsStore {
         }
         sb.append("## 已入账事实（").append(counts()).append("）\n");
         int i = 1;
-        for (Fact f : facts.values()) {
+        for (Fact f : allFacts()) {
             sb.append(i++).append(". [").append(f.dimension()).append("] ").append(f.period());
             if (!f.metric().isBlank()) {
                 sb.append(" | ").append(f.metric());
@@ -236,6 +269,38 @@ public class FactsStore {
             sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
                     .append(" | ").append(f.status())
                     .append(" | 入账Agent: ").append(f.origin());
+            if (f.critical()) {
+                sb.append(" | 关键依赖");
+            }
+            if (!f.source().isBlank()) {
+                sb.append(" | 来源: ").append(f.source());
+            }
+            if (!f.note().isBlank()) {
+                sb.append(" | ").append(f.note());
+            }
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** 给子任务契约使用的父账本机器生成切片；替代父模型手写事实 context。 */
+    public String factSlice() {
+        if (facts.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder("# 父Agent事实切片（机器生成，只读权威输入）\n");
+        int i = 1;
+        for (Fact f : facts.values()) {
+            sb.append(i++).append(". [").append(f.dimension()).append("] ").append(f.period());
+            if (!f.metric().isBlank()) {
+                sb.append(" | ").append(f.metric());
+            }
+            sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
+                    .append(" (").append(f.status()).append("; 来源Agent ").append(f.origin());
+            if (f.critical()) {
+                sb.append("; 关键依赖");
+            }
+            sb.append(")");
             if (!f.source().isBlank()) {
                 sb.append(" | 来源: ").append(f.source());
             }
@@ -265,7 +330,7 @@ public class FactsStore {
             }
             gaps.add(gap);
         }
-        for (Fact f : facts.values()) {
+        for (Fact f : allFacts()) {
             if ("not_found".equals(f.status()) && f.note().isBlank()) {
                 gaps.add("[" + f.dimension() + "@" + f.period() + "]"
                         + "：声明未检索到，但未说明已尝试的检索关键词与来源（放弃过早）");
@@ -281,7 +346,7 @@ public class FactsStore {
     /** 同一语义事实在多个来源 Agent 间数值/状态不一致时，终答闸门显式要求先裁决。 */
     private String evidenceConflicts() {
         Map<String, List<Fact>> bySemantic = new LinkedHashMap<>();
-        for (Fact f : facts.values()) {
+        for (Fact f : allFacts()) {
             bySemantic.computeIfAbsent(semanticKey(f), k -> new ArrayList<>()).add(f);
         }
 
@@ -327,7 +392,7 @@ public class FactsStore {
         List<Cell> missing = new ArrayList<>();
         for (Map.Entry<String, List<String>> e : targets.entrySet()) {
             for (String p : e.getValue()) {
-                boolean hit = facts.values().stream()
+                boolean hit = allFacts().stream()
                         .anyMatch(f -> e.getKey().equals(f.dimension()) && p.equals(f.period()));
                 if (!hit) {
                     missing.add(new Cell(e.getKey(), p));
@@ -340,7 +405,7 @@ public class FactsStore {
     /** 缺口格的疑似已入账条目（dimension 近似即可，含 period 错位的同维度条目），最多 2 条。 */
     private List<String> suspectsFor(Cell c) {
         List<String> suspects = new ArrayList<>();
-        for (Fact f : facts.values()) {
+        for (Fact f : allFacts()) {
             if (nearDim(c.dimension(), f.dimension())) {
                 String s = "[" + f.dimension() + "@" + f.period() + "]";
                 if (!suspects.contains(s)) {
@@ -387,12 +452,31 @@ public class FactsStore {
     }
 
     private String counts() {
-        long found = facts.values().stream().filter(f -> "found".equals(f.status())).count();
-        long proxy = facts.values().stream().filter(f -> "proxy".equals(f.status())).count();
-        long nf = facts.values().stream().filter(f -> "not_found".equals(f.status())).count();
-        long other = facts.size() - found - proxy - nf;
-        return "已入账 " + facts.size() + " 条（found " + found + "、proxy " + proxy
+        List<Fact> all = allFacts();
+        long found = all.stream().filter(f -> "found".equals(f.status())).count();
+        long proxy = all.stream().filter(f -> "proxy".equals(f.status())).count();
+        long nf = all.stream().filter(f -> "not_found".equals(f.status())).count();
+        long other = all.size() - found - proxy - nf;
+        return "已入账 " + all.size() + " 条（found " + found + "、proxy " + proxy
                 + "、not_found " + nf + (other > 0 ? "、其他 " + other : "") + "）";
+    }
+
+    /** 非 found 的关键依赖清单，供终答校验强制核对保守主方案与升级条件。 */
+    public String criticalAssumptions() {
+        List<String> items = allFacts().stream()
+                .filter(Fact::critical)
+                .filter(f -> !"found".equals(f.status()))
+                .map(f -> "[" + f.dimension() + "@" + f.period()
+                        + (f.metric().isBlank() ? "" : "|" + f.metric()) + "] "
+                        + f.status() + " = " + f.value() + "；note=" + f.note())
+                .toList();
+        return items.isEmpty() ? null : String.join("\n", items);
+    }
+
+    private List<Fact> allFacts() {
+        List<Fact> all = new ArrayList<>(inheritedFacts);
+        all.addAll(facts.values());
+        return all;
     }
 
     private static String semanticKey(Fact f) {
@@ -411,7 +495,7 @@ public class FactsStore {
 
     private static Fact withOrigin(Fact f, String origin) {
         return new Fact(f.dimension(), f.period(), f.metric(), f.value(),
-                f.source(), f.status(), f.note(), origin);
+                f.source(), f.status(), f.note(), origin, f.critical());
     }
 
     private static boolean sameEvidence(Fact a, Fact b) {

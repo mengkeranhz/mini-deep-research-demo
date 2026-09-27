@@ -37,7 +37,9 @@ public class Agent {
             1. 事实错误：草稿的数据/结论与「事实账本」矛盾，或断言了账本与校验依据都不支撑的确定性事实；
             2. 账本矛盾/遗漏：草稿声称「未找到/未检索到 X」而账本中 X 为 found/proxy；账本 found 的关键事实被草稿写错或遗漏；
             3. 硬约束违反：「校验依据」中可判定的硬约束未满足；
-            4. 关键缺口未声明：述求要求的核心内容缺失且草稿未如实说明原因；账本 status=not_found 的条目草稿未如实交代。
+            4. 关键缺口未声明：述求要求的核心内容缺失且草稿未如实说明原因；账本 status=not_found 的条目草稿未如实交代；
+            5. 技能/关键依赖违反：未满足已加载技能的可判定输出骨架或终检要求；critical 且非 found 的依赖被用作主方案唯一支撑，
+               而没有采用保守主方案并写明升级条件。
             裁决规则：
             - 交付形态合法：最终交付物为磁盘文件（如 Markdown 路书）时，「文件路径+摘要+关键结论」是合法答案形态；
               「答案里没列来源/没贴完整内容/没给样例」不构成缺陷——只要文件内容已按校验依据与账本覆盖即可。
@@ -60,6 +62,7 @@ public class Agent {
     private final FactsStore facts;
     private final SearchLog searchLog;
     private final SkillState skillState;
+    private final SubAgentStore subAgentReports;
     /** 终答最近一次被拒的缺陷清单：非空时随上下文压缩重建以最高优先级注入（防重建后靠猜补缺陷）。 */
     private String pendingFinalDefects;
     /** 运行中的用户回复通道：任务未完成时模型向用户提问，从这里读回答。 */
@@ -86,12 +89,13 @@ public class Agent {
         this.facts = new FactsStore(agentId);
         this.searchLog = new SearchLog(agentId);
         this.skillState = new SkillState(); // 会话级生效技能：load_skill 写入，规划注入与压缩重建读取
+        this.subAgentReports = new SubAgentStore();
         this.registry = new ToolRegistry(cfg, tasks, facts, skillState, searchLog);
         this.console = rootAgent ? new Scanner(System.in, StandardCharsets.UTF_8) : null;
 
         // delegate_agent 放在 org.example 包，不会被自动扫描；只注册给父 Agent，防止子 Agent 递归委派。
         if (rootAgent) {
-            registry.registerTool(new DelegateAgentTool(cfg, facts, searchLog, skillState));
+            registry.registerTool(new DelegateAgentTool(cfg, facts, searchLog, skillState, subAgentReports));
         }
     }
 
@@ -100,7 +104,8 @@ public class Agent {
      * 继承父检索历史与当前技能，接收父任务指定的精确覆盖目标。
      */
     static Agent createSubAgent(Config.Data parentCfg, String agentId, Path workspace,
-                                List<SearchLog.Entry> seedSearches, Skill inheritedSkill,
+                                List<SearchLog.Entry> seedSearches, List<FactsStore.Fact> parentFacts,
+                                Skill inheritedSkill,
                                 Map<String, List<String>> requiredFacts, int maxRounds) {
         Config.Data childCfg = new Config.Data(
                 parentCfg.llm(), parentCfg.webSearch(), parentCfg.lbs(),
@@ -109,6 +114,7 @@ public class Agent {
 
         Agent child = new Agent(childCfg, agentId, false, maxRounds);
         child.searchLog.merge(seedSearches);
+        child.facts.inherit(parentFacts);
         if (inheritedSkill != null) {
             child.skillState.set(inheritedSkill); // 只初始化子 Agent 自己的 SkillState，不反向修改父 Agent
         }
@@ -200,6 +206,12 @@ public class Agent {
             System.out.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
             callMessages.add(Msg.user(factsSnapshot));
         }
+        if (rootAgent) {
+            String reports = subAgentReports.snapshot();
+            if (reports != null) {
+                callMessages.add(Msg.user(reports));
+            }
+        }
         return callMessages;
     }
 
@@ -247,8 +259,8 @@ public class Agent {
     }
 
     /**
-     * 无工具纯文本轮的三种去向：任务已全部完成 → 最终结论，直接返回、不走终答闸门；
-     * 空响应 → 注入催促后重试；未规划（空任务）或任务未完成 → 视为面向用户的中间陈述
+     * 无工具纯文本轮：任务已全部完成 → 先过终答闸门；空响应 → 注入催促后重试；
+     * 未规划（空任务）或任务未完成 → 视为面向用户的中间陈述
      * （如技能第一步的集中澄清），等待 stdin 回复后继续（中途提问曾被校验当「不合格答案」打回，
      * 故不走 final_answer 闸门）。返回非 null 表示这就是最终结论；null 表示本轮已处理完毕，进入下一轮。
      */
@@ -270,9 +282,23 @@ public class Agent {
             state.transcript.append("用户: ").append(instruction).append('\n');
             return null;
         }
-        if (!tasks.isEmpty() && tasks.allDone()) {
+        if (tasks.isEmpty() && facts.isEmpty() && subAgentReports.snapshot() == null) {
+            state.messages.add(Msg.assistant(resp.blocks()));
             state.transcript.append("助手: ").append(candidate).append('\n');
             return candidate;
+        }
+        if (tasks.isEmpty() || tasks.allDone()) {
+            state.messages.add(Msg.assistant(resp.blocks()));
+            state.bestAnswer = candidate;
+            String defects = finalGate(candidate);
+            if (defects == null) {
+                return candidate;
+            }
+            pendingFinalDefects = defects;
+            state.messages.add(Msg.user(defects));
+            state.transcript.append("助手: ").append(candidate).append('\n')
+                    .append("用户: ").append(defects).append('\n');
+            return null;
         }
         awaitUserReply(state, resp, candidate);
         return null;
@@ -439,12 +465,50 @@ public class Agent {
     private String finalGate(String draft) {
         String criteria = tasks.baseline();
         String ledger = facts.ledger();
-        if (criteria == null && ledger == null) {
+        Skill skill = skillState.get();
+        String reports = subAgentReports.verificationSection();
+        if (criteria == null && ledger == null && skill == null && reports == null) {
             return null;
         }
+
+        // 确定性闸门前置：覆盖缺口、账本冲突、not_found 说明缺失时，不浪费一次昂贵 LLM 校验。
+        String gaps = facts.gateReport();
+        if (gaps != null) {
+            System.out.println("\n[覆盖度/冲突闸门] 未通过：\n" + gaps);
+            return "最终回答前检查发现以下数据覆盖或冲突缺口：\n" + gaps
+                    + "\n\n请逐项处理后再重新提交【完整的最终回答】，先判断缺口类型再选动作：\n"
+                    + "1. 缺口清单已点名「账本中已有疑似条目」的，属标签错位——照抄覆盖目标的 "
+                    + "dimension/period 字符串重新入账即可，不重新检索；\n"
+                    + "2. 确实未检索的，继续检索（换关键词、统计口径、来源）并 record_facts 入账；\n"
+                    + "3. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；关键依赖必须同时写保守主方案与升级条件；\n"
+                    + "4. 确认检索不到的，用 record_facts 声明 status=not_found，"
+                    + "note 写明已尝试的检索关键词与来源，并给不依赖它的保守主方案。";
+        }
+
+        String critical = facts.criticalAssumptions();
+        if (critical != null && (!draft.contains("保守主方案") || !draft.contains("升级条件"))) {
+            String defects = "最终回答存在未降级的关键依赖：以下 critical 事实不是 found，"
+                    + "但答案没有同时给出「保守主方案」与「升级条件」，不能让它直接支撑主方案：\n"
+                    + critical;
+            System.out.println("\n[关键依赖闸门] 未通过：\n" + critical);
+            return defects;
+        }
+
         String basis = criteria == null ? "" : criteria;
         if (ledger != null) {
             basis = basis + (basis.isEmpty() ? "" : "\n\n") + ledger;
+        }
+        if (skill != null) {
+            basis = basis + (basis.isEmpty() ? "" : "\n\n")
+                    + "# 已加载技能终检与输出格式要求（必须执行）\n" + skill.instructions();
+        }
+        if (critical != null) {
+            basis = basis + "\n\n# 关键依赖降级核对\n以下关键依赖不是 found，"
+                    + "最终答案不得把它们作为主方案唯一支撑；必须采用保守主方案，并写明升级条件：\n"
+                    + critical;
+        }
+        if (reports != null) {
+            basis = basis + "\n\n" + reports;
         }
         String verdict = verify(draft, basis);
         if (!verdict.strip().toUpperCase().startsWith("PASS")) {
@@ -461,21 +525,7 @@ public class Agent {
                     + "不必对全文重跑双向对账。";
         }
         System.out.println("[最终校验] 通过");
-        // 覆盖度硬闸门：声明的覆盖目标还有格子没入账，或 not_found 声明没写检索方式，
-        // 不放行——防止「5/5 任务完成」的假象掩盖数据缺口（如某年季度数据根本没查）
-        String gaps = facts.gateReport();
-        if (gaps != null) {
-            System.out.println("\n[覆盖度闸门] 未通过：\n" + gaps);
-            return "最终回答前检查发现以下数据覆盖缺口：\n" + gaps
-                    + "\n\n请逐项处理后再重新提交【完整的最终回答】，先判断缺口类型再选动作：\n"
-                    + "1. 缺口清单已点名「账本中已有疑似条目」的，属标签错位——照抄覆盖目标的 "
-                    + "dimension/period 字符串重新入账即可，不重新检索；\n"
-                    + "2. 确实未检索的，继续检索（换关键词、统计口径、来源）并 record_facts 入账；\n"
-                    + "3. 检索不到官方值的，给代理指标（status=proxy，注明折算方法）；\n"
-                    + "4. 确认检索不到的，用 record_facts 声明 status=not_found，"
-                    + "note 写明已尝试的检索关键词与来源，并在最终答案中如实说明该缺口。";
-        }
-        System.out.println("[覆盖度闸门] 通过");
+        System.out.println("[覆盖度/冲突闸门] 通过");
         return null;
     }
 
@@ -526,6 +576,12 @@ public class Agent {
         if (searches != null) {
             rebuilt.append("\n\n【已检索清单：本次任务执行过的全部 web_search——语义相同的目标不要再检索，只为空缺 facet 补检索】\n")
                     .append(searches);
+        }
+        if (rootAgent) {
+            String reports = subAgentReports.snapshot();
+            if (reports != null) {
+                rebuilt.append("\n\n").append(reports);
+            }
         }
         if (bestAnswer != null && !bestAnswer.isBlank()) {
             rebuilt.append("\n\n【旧答案草稿：仅供结构参考，其中与事实账本冲突或账本已更新的数据必须重写】\n")

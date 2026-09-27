@@ -17,10 +17,10 @@
 
 ### 顺序子 Agent
 
-- `delegate_agent` 阻塞式运行一个边界清晰的子任务：子 Agent 复用模型与工具配置，但拥有独立任务计划、事实账本、检索日志、技能状态与 `subagents/<agent-id>/` 文件目录
+- `delegate_agent` 阻塞式运行一个边界清晰的子任务：子 Agent 复用模型与工具配置，但拥有独立任务计划、事实账本、检索日志、技能状态与 `subagents/<agent-id>/` 文件目录；父账本会生成机器只读事实切片，子 Agent 不依赖父模型手写事实 context
 - 多版本 / 多方案 / 多情景任务按「一个最终交付物实例一个子 Agent」委派，并通过 `variant` 标明版本名；子 Agent 内部再自行 `analyze_query`
 - 子 Agent 继承父 Agent 的检索日志与当前技能，不能向用户提问，也不能递归调用 `delegate_agent`；默认 60 轮，必须通过自己的 `final_answer` 闸门
-- 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent：同 key 证据不互相覆盖；数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
+- 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent，最终报告另存为 `subagents/<agent-id>/final-report.md`：同 key 证据不互相覆盖；数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
 
 ### 事实账本
 
@@ -33,6 +33,7 @@
 
 1. **约束校验**：独立校验器对照固化基线与账本逐条核对草稿——数据矛盾、遗漏入账事实、假称「未找到」均拦截
 2. **覆盖度闸门**：覆盖目标还有格子未入账，或 `not_found` 未写明检索方式，不放行——防止「5/5 任务完成」的假象掩盖数据缺口
+3. **技能与关键依赖闸门**：已加载技能的输出骨架与终检要求会进入校验依据；`critical=true` 且非 `found` 的住宿、通行、放票等依赖不得直接支撑主方案，必须给保守主方案与升级条件
 
 ## 内置工具
 
@@ -105,6 +106,7 @@ src/main/java/org/example/
 ├── Main.java            # 入口：读入述求，运行 Agent，打印结论
 ├── Agent.java           # Agent 循环 + 终答闸门 + 上下文压缩
 ├── DelegateAgentTool.java # 顺序子 Agent 委派与结果合并
+├── SubAgentStore.java    # 子 Agent 报告路径与汇总核对状态
 ├── SystemPrompt.java    # 人格提示词（目标 / 准则 / 输出要求 / 边界）
 ├── TaskStore.java       # 任务清单与校验基线（外部状态）
 ├── FactsStore.java      # 事实账本与覆盖目标（外部状态）

@@ -24,13 +24,16 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
     private final FactsStore parentFacts;
     private final SearchLog parentSearchLog;
     private final SkillState parentSkills;
+    private final SubAgentStore reports;
 
     public DelegateAgentTool(Config.Data cfg, FactsStore parentFacts,
-                             SearchLog parentSearchLog, SkillState parentSkills) {
+                             SearchLog parentSearchLog, SkillState parentSkills,
+                             SubAgentStore reports) {
         this.cfg = cfg;
         this.parentFacts = parentFacts;
         this.parentSearchLog = parentSearchLog;
         this.parentSkills = parentSkills;
+        this.reports = reports;
     }
 
     @Override
@@ -50,14 +53,14 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 "description", "子任务硬约束，可选"));
         properties.put("required_facts", Map.of("type", "array", "description", """
                 子任务必须覆盖的事实目标，可选但研究类任务建议提供。每项
-                {"dimension":"指标维度","periods":["时期",...]}；dimension/period 会原样传给子 Agent。
-                传 variant 时，dimension 必须带该版本前缀""",
+                {"dimension":"指标维度","periods":["时期",...]}。传 variant 时会自动补版本前缀；
+                「版本：指标」与「版本·指标」会统一归一，避免字符串手滑导致覆盖失败。""",
                 "items", Map.of("type", "object", "properties", Map.of(
                         "dimension", Map.of("type", "string"),
                         "periods", Map.of("type", "array", "items", Map.of("type", "string"))),
                         "required", List.of("dimension", "periods"))));
         properties.put("context", Map.of("type", "string",
-                "description", "父任务背景或只读事实切片，可选；不要传完整父对话"));
+                "description", "父任务背景，可选；不要手写事实数值，父事实账本会机器生成只读切片自动传给子 Agent"));
         properties.put("expected_output", Map.of("type", "string",
                 "description", "期望的子任务输出格式与完成标准，可选"));
         properties.put("max_rounds", Map.of("type", "integer",
@@ -78,8 +81,7 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         String task = ToolRegistry.str(input, "task");
         String variant = normalize(ToolRegistry.optStr(input, "variant"));
         List<String> constraints = strings(input, "constraints");
-        Map<String, List<String>> requiredFacts = requiredFacts(input);
-        requireVariantScopedFacts(variant, requiredFacts);
+        Map<String, List<String>> requiredFacts = requiredFacts(input, variant);
         String context = ToolRegistry.optStr(input, "context");
         String expectedOutput = ToolRegistry.optStr(input, "expected_output");
         int maxRounds = clamp(ToolRegistry.optInt(input, "max_rounds",
@@ -93,15 +95,20 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
 
         Skill inheritedSkill = parentSkills.get();
         Agent child = Agent.createSubAgent(cfg, agentId, workspace,
-                parentSearchLog.entries(), inheritedSkill, requiredFacts, maxRounds);
+                parentSearchLog.entries(), parentFacts.facts(), inheritedSkill,
+                requiredFacts, maxRounds);
 
         System.out.println(Console.tool("[delegate_agent] 启动子Agent " + agentId
                 + "（最大 " + maxRounds + " 轮，目录 " + workspace + "）"));
         Agent.SubAgentResult result = child.runAsSubAgent(buildRequest(
-                task, variant, constraints, requiredFacts, context, expectedOutput, inheritedSkill));
+                task, variant, constraints, requiredFacts, context, expectedOutput,
+                inheritedSkill, parentFacts.factSlice()));
 
         FactsStore.MergeResult factMerge = parentFacts.mergeChild(result.facts(), agentId);
         SearchLog.MergeResult searchMerge = parentSearchLog.merge(result.searches());
+        Path reportPath = workspace.resolve("final-report.md");
+        Files.writeString(reportPath, result.answer());
+        reports.add(agentId, variant, reportPath, factMerge.conflicts());
         System.out.println(Console.tool("[delegate_agent] 子Agent " + agentId + " 完成：事实新增 "
                 + factMerge.added() + " / 冲突 " + factMerge.conflicts().size()
                 + "，检索新增 " + searchMerge.added()));
@@ -111,7 +118,7 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
 
     private static String buildRequest(String task, String variant, List<String> constraints,
                                        Map<String, List<String>> requiredFacts, String context,
-                                       String expectedOutput, Skill skill) {
+                                       String expectedOutput, Skill skill, String factSlice) {
         StringBuilder request = new StringBuilder("请执行以下子任务契约。\n");
         if (variant != null) {
             request.append("\n## 唯一方案版本\n").append(variant)
@@ -126,6 +133,11 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         }
         if (context != null && !context.isBlank()) {
             request.append("\n\n## 父任务背景 / 只读输入\n").append(context.strip());
+        }
+        if (factSlice != null && !factSlice.isBlank()) {
+            request.append("\n\n").append(factSlice)
+                    .append("\n使用规则：以上父Agent事实切片是只读权威输入；不要重复检索已列数据，")
+                    .append("新增数据必须 record_facts 入账，最终报告不得与切片或本层账本矛盾。\n");
         }
         if (!requiredFacts.isEmpty()) {
             request.append("\n\n## 必须覆盖的事实目标\n")
@@ -160,7 +172,8 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                                  SearchLog.MergeResult searchMerge) {
         StringBuilder sb = new StringBuilder("子 Agent ").append(agentId).append(" 执行完成。\n\n")
                 .append("## 子 Agent 最终报告\n").append(answer).append('\n')
-                .append("\n## 子 Agent 文件目录\n").append(workspace).append('\n')
+                .append("\n## 子 Agent 文件目录\n").append(workspace)
+                .append("\n## 最终报告文件\n").append(workspace.resolve("final-report.md")).append('\n')
                 .append("\n## 事实合并（按来源 Agent 保留，不互相覆盖）\n")
                 .append("- 新增: ").append(factMerge.added())
                 .append("; 更新: ").append(factMerge.updated())
@@ -190,10 +203,10 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 : ToolRegistry.strList(input, key);
     }
 
-    private static Map<String, List<String>> requiredFacts(JsonNode input) {
+    private static Map<String, List<String>> requiredFacts(JsonNode input, String variant) {
         Map<String, List<String>> out = new LinkedHashMap<>();
         for (JsonNode node : input.path("required_facts")) {
-            String dimension = node.path("dimension").asText(null);
+            String dimension = scopedDimension(variant, node.path("dimension").asText(null));
             if (dimension == null || dimension.isBlank()) {
                 continue;
             }
@@ -204,28 +217,25 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 }
             }
             if (!periods.isEmpty()) {
-                out.putIfAbsent(dimension.strip(), periods);
+                out.putIfAbsent(dimension, periods);
             }
         }
         return out;
     }
 
-    /** 多版本委派时强制 required_facts 维度带版本前缀，防止一版数据被误判为覆盖另一版。 */
-    private static void requireVariantScopedFacts(String variant,
-             Map<String, List<String>> requiredFacts) {
-        if (variant == null || requiredFacts.isEmpty()) {
-            return;
+    /** 多版本目标自动加版本前缀，并容忍「版本：指标」等分隔符变体。 */
+    private static String scopedDimension(String variant, String dimension) {
+        String d = FactsStore.canonicalDimension(dimension);
+        if (variant == null || d == null || d.isBlank()) {
+            return d;
         }
-        String prefix = variant + "·";
-        List<String> invalid = requiredFacts.keySet().stream()
-                .filter(dimension -> !dimension.startsWith(prefix))
-                .toList();
-        if (!invalid.isEmpty()) {
-            throw new IllegalArgumentException("已传 variant=" + variant
-                    + "，但 required_facts 的 dimension 未带版本前缀「" + prefix
-                    + "」: " + String.join("、", invalid)
-                    + "。请为每个版本分别声明覆盖目标");
+        for (String sep : List.of("·", "：", ":")) {
+            String prefix = variant + sep;
+            if (d.startsWith(prefix)) {
+                return variant + "·" + d.substring(prefix.length()).strip();
+            }
         }
+        return variant + "·" + d;
     }
 
     private static int clamp(int value) {

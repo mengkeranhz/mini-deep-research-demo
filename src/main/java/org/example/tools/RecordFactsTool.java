@@ -36,7 +36,9 @@ public class RecordFactsTool implements AgentTool {
                         + "（不要攒到最后批量补）；最终答案的全部数据必须来自账本。"
                         + "回执区分新增/覆盖更新/无变化——无变化=数据已在账本，直接复用，不要重复检索。"
                         + "status: found=官方或已交叉核验；proxy=代理指标/第三方折算（note 写折算方法）；"
-                        + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。",
+                        + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。"
+                        + "住宿可订、道路通行、放票、闭馆等主计划关键依赖应传 critical=true；"
+                        + "critical 且非 found 时，note 必须同时写「保守主方案：」和「升级条件：」。",
                 Map.of("type", "object",
                         "properties", Map.of(
                                 "facts", Map.of("type", "array", "description", "本次入账的事实数组",
@@ -56,7 +58,9 @@ public class RecordFactsTool implements AgentTool {
                                                                 "enum", List.of("found", "proxy", "not_found"),
                                                                 "description", "数据状态"),
                                                         "note", Map.of("type", "string",
-                                                                "description", "口径说明/折算方法；not_found 时写已尝试的检索关键词与来源")),
+                                                                "description", "口径说明/折算方法；not_found 时写已尝试的检索关键词与来源"),
+                                                        "critical", Map.of("type", "boolean",
+                                                                "description", "该事实是否为方案成立的关键依赖。非 found 的关键依赖必须在 note 写「保守主方案：」与「升级条件：」")),
                                                 "required", List.of("dimension", "period", "status")))),
                         "required", List.of("facts")));
     }
@@ -78,6 +82,7 @@ public class RecordFactsTool implements AgentTool {
             String period = ToolRegistry.optStr(n, "period");
             String status = normalize(ToolRegistry.optStr(n, "status"));
             String note = ToolRegistry.optStr(n, "note");
+            boolean critical = n.path("critical").asBoolean(false);
             if (dimension == null || period == null) {
                 rejected.add("缺 dimension 或 period: " + abbreviate(n));
                 continue;
@@ -90,12 +95,19 @@ public class RecordFactsTool implements AgentTool {
                 rejected.add("[" + dimension + "@" + period + "] not_found 必须在 note 写明已尝试的检索关键词与来源");
                 continue;
             }
+            if (critical && !"found".equals(status) && (note == null
+                    || !note.contains("保守主方案：") || !note.contains("升级条件："))) {
+                rejected.add("[" + FactsStore.canonicalDimension(dimension) + "@" + period
+                        + "] 是关键依赖但状态为 " + status
+                        + "，必须在 note 同时写明「保守主方案：」与「升级条件：」，不得让它直接支撑主方案");
+                continue;
+            }
             // 三态计数：无变化=重复入账既有数据，回执点名提示——给模型即时的「勿重复检索」负反馈
             switch (facts.record(new FactsStore.Fact(dimension, period,
                     orEmpty(ToolRegistry.optStr(n, "metric")),
                     orEmpty(ToolRegistry.optStr(n, "value")),
                     orEmpty(ToolRegistry.optStr(n, "source")),
-                    status, orEmpty(note)))) {
+                    status, orEmpty(note), null, critical))) {
                 case NEW -> added++;
                 case UPDATED -> updated++;
                 case UNCHANGED -> unchanged++;
