@@ -561,10 +561,26 @@ public class Agent {
     }
 
     /** 最终校验：quiet 客户端判断草稿是否满足约束与质量，返回 PASS 或缺陷清单。 */
-    private String verify(String draft, String criteria) {
+    private LlmResponse verify(String draft, String criteria) {
         return quietLlm.call(List.of(),
                 List.of(Msg.system(VERIFY_PROMPT),
-                        Msg.user("校验依据：\n" + criteria + "\n\n草稿回答：\n" + draft))).text();
+                        Msg.user("校验依据：\n" + criteria + "\n\n草稿回答：\n" + draft)));
+    }
+
+    /** 生成校验器基础设施异常回执：明确原因与调整方向，避免主模型把空 verdict 误当内容 BLOCKER。 */
+    private static String verifierFailureReceipt(LlmResponse verification, String verdict) {
+        String stop = verification.stopReason();
+        String cause = verification.maxTokensStopped()
+                ? "校验器在输出 PASS/FAIL 前因 stop_reason=" + stop + " 截断"
+                : "校验器返回空 verdict" + (stop.isBlank() ? "" : "（stop_reason=" + stop + "）");
+
+        return """
+                最终校验器未产出内容裁决：%s。%s
+
+                这不是答案内容 FAIL，也没有任何内容 BLOCKER；不要据此修改事实、删除关键结论或重新检索。
+                请针对“校验输入/终稿体积”进行调整：保留技能要求的全部章节、事实账本数据、关键计算过程、保守主方案、升级条件、待核实项和来源完整性，压缩重复叙述、合并同类说明、精简表格备注与冗余转写，降低一次性终校验负担，然后重新提交完整的 final_answer。
+                校验器 thinking=max 保持不变；本回执只要求你压缩交付文本体积，不要求降低校验严谨性。
+                """.formatted(cause, verdict.isBlank() ? "" : "已收到截断片段，但不能作为完整裁决采用。");
     }
 
     /**
@@ -573,6 +589,7 @@ public class Agent {
      * 2. critical 依赖是否已降级；
      * 3. quiet LLM 做事实、约束、技能格式复核。
      * 无任何校验依据时直接放行；返回 null 表示通过，非 null 是要回传模型的缺陷清单。
+     * 校验器空 verdict / max_tokens 属于基础设施异常，返回明确回执而不包装成内容 BLOCKER。
      * 任务依据使用首次规划的固定基线，事实依据使用全量账本，避免 live 重规划放宽原始要求。
      */
     private String finalGate(String draft) {
@@ -626,7 +643,15 @@ public class Agent {
         if (reports != null) {
             basis = basis + "\n\n" + reports;
         }
-        String verdict = verify(draft, basis);
+        LlmResponse verification = verify(draft, basis);
+        String verdict = verification.text();
+        // 校验器没有产出可用 verdict 时，这是基础设施异常，不是答案内容缺陷。
+        // max_tokens 可能发生在长思考后、Text 块尚未生成时；此时绝不能把空串包装成 BLOCKER。
+        if (verification.maxTokensStopped() || verdict.isBlank()) {
+            String receipt = verifierFailureReceipt(verification, verdict);
+            AgentOutput.println("\n[最终校验] 校验器未产出 verdict（非内容 FAIL）：\n" + receipt);
+            return receipt;
+        }
         // LLM 校验失败时，附上“按缺陷类型修复”的操作指引，避免模型盲目重查。
         if (!verdict.strip().toUpperCase().startsWith("PASS")) {
             AgentOutput.println("\n[最终校验] 未通过：\n" + verdict);

@@ -109,6 +109,7 @@ final class AnthropicClient implements LlmClient {
             throw new HttpRetry.HttpError(resp.statusCode(), resp.body());
         }
         JsonNode root = parse(resp.body());
+        JsonNode stopNode = root.path("stop_reason");
         List<Block> blocks = new ArrayList<>();
         for (JsonNode cb : root.path("content")) {
             blocks.add(block(cb));
@@ -116,7 +117,8 @@ final class AnthropicClient implements LlmClient {
         return new LlmResponse(blocks,
                 root.path("usage").path("input_tokens").asInt(),
                 root.path("usage").path("output_tokens").asInt(),
-                root.path("usage").path("cache_read_input_tokens").asLong());
+                root.path("usage").path("cache_read_input_tokens").asLong(),
+                stopNode.isMissingNode() || stopNode.isNull() ? "" : stopNode.asText(""));
     }
 
     /** 流式：消费 SSE 事件流，边接收边打印增量，边累积成完整 Block。 */
@@ -130,6 +132,7 @@ final class AnthropicClient implements LlmClient {
         Map<Integer, ObjectNode> open = new HashMap<>(); // index → 累积中的 content block
         int[] usage = {0, 0};
         long[] cacheRead = {0}; // 前缀缓存命中 token（message_start 与 message_delta 均可能携带）
+        String[] stopReason = {""};
         boolean[] completed = {false}; // 收到正常收尾信号（message_delta 的 stop_reason / message_stop）
         try (Stream<String> lines = resp.body()) {
             lines.filter(line -> line.startsWith("data:")).forEach(line -> {
@@ -159,6 +162,7 @@ final class AnthropicClient implements LlmClient {
                         }
                         String sr = d.path("delta").path("stop_reason").asText("");
                         if (!sr.isBlank()) {
+                            stopReason[0] = sr;
                             completed[0] = true;
                             // 异常收尾（max_tokens 截断 / refusal 拒答等）就地亮明，别让它无声滑过
                             if (!"end_turn".equals(sr) && !"tool_use".equals(sr)
@@ -185,7 +189,7 @@ final class AnthropicClient implements LlmClient {
                     ? "流式响应无任何内容块与用量（疑似网关空流/仅 message_start 即中断）"
                     : "流式响应疑似中途截断：已收 " + blocks.size() + " 个内容块但未见收尾事件");
         }
-        return new LlmResponse(blocks, usage[0], usage[1], cacheRead[0]);
+        return new LlmResponse(blocks, usage[0], usage[1], cacheRead[0], stopReason[0]);
     }
 
     /** 按 delta 类型累积到块上；非静默客户端文本/思考增量同时实时打印。 */

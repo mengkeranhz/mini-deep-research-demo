@@ -91,7 +91,8 @@ final class OpenAiClient implements LlmClient {
                 message.path("content").asText(""),
                 message.path("tool_calls"),
                 root.path("usage").path("prompt_tokens").asInt(),
-                root.path("usage").path("completion_tokens").asInt());
+                root.path("usage").path("completion_tokens").asInt(),
+                finishReason(root.path("choices").path(0).path("finish_reason")));
     }
 
     /** 流式：消费 SSE 分片，边接收边打印增量，边累积文本/思考/工具调用。 */
@@ -105,6 +106,7 @@ final class OpenAiClient implements LlmClient {
         StringBuilder text = new StringBuilder();
         Map<Integer, ObjectNode> calls = new TreeMap<>(); // tool_calls 分片按 index 累积
         int[] usage = {0, 0};
+        String[] finishReason = {""};
         try (Stream<String> lines = resp.body()) {
             lines.filter(line -> line.startsWith("data:")).forEach(line -> {
                 String payload = line.substring(5).strip();
@@ -115,6 +117,11 @@ final class OpenAiClient implements LlmClient {
                 if (!d.path("usage").isMissingNode() && !d.path("usage").isNull()) {
                     usage[0] = d.path("usage").path("prompt_tokens").asInt();
                     usage[1] = d.path("usage").path("completion_tokens").asInt();
+                }
+                JsonNode finishNode = d.path("choices").path(0).path("finish_reason");
+                String fr = finishNode.isMissingNode() || finishNode.isNull() ? "" : finishNode.asText("");
+                if (!fr.isBlank()) {
+                    finishReason[0] = fr;
                 }
                 JsonNode delta = d.path("choices").path(0).path("delta");
                 String think = delta.path("reasoning_content").asText("");
@@ -152,11 +159,12 @@ final class OpenAiClient implements LlmClient {
             fn.put("name", c.path("name").asText());
             fn.put("arguments", c.path("args").asText());
         });
-        return assemble(thinking.toString(), text.toString(), toolCalls, usage[0], usage[1]);
+        return assemble(thinking.toString(), text.toString(), toolCalls, usage[0], usage[1], finishReason[0]);
     }
 
     /** 累积结果 → LlmResponse；toolCalls 形如 {id, function:{name, arguments(json 字符串)}}。 */
-    private static LlmResponse assemble(String thinking, String text, JsonNode toolCalls, int inTok, int outTok) {
+    private static LlmResponse assemble(String thinking, String text, JsonNode toolCalls,
+                                        int inTok, int outTok, String finishReason) {
         List<Block> blocks = new ArrayList<>();
         if (!thinking.isBlank()) {
             blocks.add(new Block.Thinking(thinking, ""));
@@ -169,7 +177,12 @@ final class OpenAiClient implements LlmClient {
             blocks.add(new Block.ToolUse(tc.path("id").asText(), tc.path("function").path("name").asText(),
                     args.isBlank() ? M.createObjectNode() : AnthropicClient.parse(args)));
         }
-        return new LlmResponse(blocks, inTok, outTok, 0L);
+        return new LlmResponse(blocks, inTok, outTok, 0L, finishReason);
+    }
+
+    /** OpenAI finish_reason；null/missing 归一为空串，供 LlmResponse 统一判断。 */
+    private static String finishReason(JsonNode node) {
+        return node == null || node.isMissingNode() || node.isNull() ? "" : node.asText("");
     }
 
     /** 四种角色 → chat/completions 消息：system/user/assistant/tool（tool 消息带 tool_call_id）。 */
