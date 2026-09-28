@@ -20,6 +20,7 @@ public final class Console {
     private Console() {}
 
     private static final boolean ENABLED = colorEnabled();
+    private static final ThreadLocal<Boolean> PLAIN = ThreadLocal.withInitial(() -> false);
 
     private static final String RESET = "\033[0m";
     private static final String RED = "\033[31m";
@@ -36,8 +37,13 @@ public final class Console {
         return !"dumb".equals(System.getenv("TERM"));
     }
 
+    /** 子 Agent Markdown 日志线程禁用 ANSI 色码；只影响当前执行线程。 */
+    static void plain(boolean value) {
+        PLAIN.set(value);
+    }
+
     private static String paint(String code, String text) {
-        return ENABLED ? code + text + RESET : text;
+        return ENABLED && !PLAIN.get() ? code + text + RESET : text;
     }
 
     /** 错误：红色，全项目唯一允许用红的场景。 */

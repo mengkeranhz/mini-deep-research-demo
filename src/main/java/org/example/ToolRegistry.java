@@ -15,18 +15,31 @@ import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
 /**
- * 工具注册与分发。
- * 注册方式：自动扫描 org.example.tools 包下的全部 AgentTool 实现类并实例化——
- * 新增工具只需在该包内实现 AgentTool 接口，无需修改本类。
+ * 工具注册与分发。实现类仍自动扫描 org.example.tools 包，但只有进入父/子白名单的工具才会注册。
  */
 public class ToolRegistry {
 
     /** 自动扫描的工具包。 */
     private static final String TOOL_PACKAGE = "org.example.tools";
+
+    /** 父 Agent 工具白名单：可规划、委派、检索、核算与终答。 */
+    public static final Set<String> ROOT_TOOL_NAMES = Set.of(
+            "load_skill", "analyze_query", "update_task", "delegate_agent",
+            "locate_sources", "web_search", "fetch_url", "read_file",
+            "record_facts", "run_code", "current_time", "search_place",
+            "search_nearby", "route_query", "render_card", "final_answer");
+
+    /** 子 Agent 工具白名单：与父相同，但禁止递归 delegate_agent。 */
+    public static final Set<String> SUB_AGENT_TOOL_NAMES = Set.of(
+            "load_skill", "analyze_query", "update_task", "locate_sources",
+            "web_search", "fetch_url", "read_file", "record_facts",
+            "run_code", "current_time", "search_place", "search_nearby",
+            "route_query", "render_card", "final_answer");
 
     /** 工具接口：名称 + 元信息 + 执行。 */
     public interface AgentTool {
@@ -43,22 +56,18 @@ public class ToolRegistry {
     private final Map<String, AgentTool> tools = new LinkedHashMap<>();
 
     public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, SkillState skills,
-                        SearchLog searchLog) {
+                        SearchLog searchLog, SubAgentStore subAgentReports, Set<String> allowedTools) {
         AmapClient amap = new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs());
         scanPackage(TOOL_PACKAGE).stream()
                 .filter(ToolRegistry::isToolClass)
                 .sorted(Comparator.comparing(Class::getSimpleName)) // 按类名稳定排序
-                .map(c -> instantiate(c, cfg, amap, tasks, facts, skills, searchLog))
+                .map(c -> instantiate(c, cfg, amap, tasks, facts, skills, searchLog, subAgentReports))
+                .filter(tool -> allowedTools.contains(tool.name()))
                 .forEach(this::register);
     }
 
     private void register(AgentTool tool) {
         tools.put(tool.name(), tool);
-    }
-
-    /** 手动注册自动扫描之外的工具（如仅父 Agent 可用的 delegate_agent）。 */
-    public void registerTool(AgentTool tool) {
-        register(tool);
     }
 
     public List<ToolDef> definitions() {
@@ -127,7 +136,8 @@ public class ToolRegistry {
 
     /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / TaskStore / FactsStore / SkillState / SearchLog / Config 各段），无参构造直接实例化。 */
     private static AgentTool instantiate(Class<?> clazz, Config.Data cfg, AmapClient amap, TaskStore tasks,
-                                         FactsStore facts, SkillState skills, SearchLog searchLog) {
+                                         FactsStore facts, SkillState skills, SearchLog searchLog,
+                                         SubAgentStore subAgentReports) {
         for (Constructor<?> ctor : clazz.getDeclaredConstructors()) {
             Class<?>[] types = ctor.getParameterTypes();
             Object[] args = new Object[types.length];
@@ -138,6 +148,7 @@ public class ToolRegistry {
                 else if (types[i] == FactsStore.class) args[i] = facts;
                 else if (types[i] == SkillState.class) args[i] = skills;
                 else if (types[i] == SearchLog.class) args[i] = searchLog;
+                else if (types[i] == SubAgentStore.class) args[i] = subAgentReports;
                 else if (types[i] == Config.Llm.class) args[i] = cfg.llm();
                 else if (types[i] == Config.WebSearch.class) args[i] = cfg.webSearch();
                 else if (types[i] == Config.Lbs.class) args[i] = cfg.lbs();
@@ -160,7 +171,7 @@ public class ToolRegistry {
             }
         }
         throw new IllegalStateException("无法实例化工具 " + clazz.getName()
-                + "：构造参数需为无参或 AmapClient / TaskStore / FactsStore / SkillState / SearchLog / Config 各段");
+                + "：构造参数需为无参或 AmapClient / TaskStore / FactsStore / SkillState / SearchLog / SubAgentStore / Config 各段");
     }
 
     private static Class<?> loadClass(String name) {

@@ -1,6 +1,17 @@
-package org.example;
+package org.example.tools;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.example.Agent;
+import org.example.AgentOutput;
+import org.example.Config;
+import org.example.Console;
+import org.example.FactsStore;
+import org.example.SearchLog;
+import org.example.Skill;
+import org.example.SkillState;
+import org.example.SubAgentStore;
+import org.example.ToolDef;
+import org.example.ToolRegistry;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,9 +22,8 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * delegate_agent：第一阶段顺序子 Agent 工具。
- * 阻塞执行一个子 Agent；子 Agent 独立规划、检索、入账并过自己的 final_answer 闸门，
- * 返回后把事实与检索日志按来源 Agent 合并回父 Agent。
+ * delegate_agent：子 Agent 委派工具。单个调用等待该子 Agent 完成；
+ * Agent Loop 会把同一批 delegate_agent 提交到线程池并发执行。
  */
 public class DelegateAgentTool implements ToolRegistry.AgentTool {
 
@@ -67,9 +77,10 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 "description", "子 Agent 最大轮次，默认 60，范围 5-60"));
 
         return new ToolDef(name(), """
-                阻塞式运行一个子 Agent，用于一个独立交付物、方案实例或边界清晰的完整子任务。
+                运行一个子 Agent，用于一个独立交付物、方案实例或边界清晰的完整子任务。
                 子 Agent 拥有独立任务计划、事实账本、检索日志和文件目录；完成后返回子任务报告，
-                并把事实与检索记录按来源 Agent 合并回父 Agent。不要用于简单事实查询；
+                并把事实与检索记录按来源 Agent 合并回父 Agent。同一轮的多个 delegate_agent 会并发执行；
+                子 Agent 日志写入 subagents/<agent-id>/agent.log.md。不要用于简单事实查询；
                 多个并列版本 / 方案 / 情景必须一个版本一个子 Agent，并传 variant。
                 调用前应将对应父任务标为 in_progress，收到结果并确认无冲突后再 update_task。
                 """, Map.of("type", "object", "properties", properties,
@@ -94,22 +105,38 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         Files.createDirectories(workspace);
 
         Skill inheritedSkill = parentSkills.get();
+        List<FactsStore.Fact> factSnapshot;
+        String factSlice;
+        synchronized (parentFacts) {
+            factSnapshot = parentFacts.facts();
+            factSlice = parentFacts.factSlice();
+        }
+        List<SearchLog.Entry> searchSnapshot;
+        synchronized (parentSearchLog) {
+            searchSnapshot = parentSearchLog.entries();
+        }
         Agent child = Agent.createSubAgent(cfg, agentId, workspace,
-                parentSearchLog.entries(), parentFacts.facts(), inheritedSkill,
+                searchSnapshot, factSnapshot, inheritedSkill,
                 requiredFacts, maxRounds);
 
-        System.out.println(Console.tool("[delegate_agent] 启动子Agent " + agentId
+        AgentOutput.println(Console.tool("[delegate_agent] 启动子Agent " + agentId
                 + "（最大 " + maxRounds + " 轮，目录 " + workspace + "）"));
         Agent.SubAgentResult result = child.runAsSubAgent(buildRequest(
                 task, variant, constraints, requiredFacts, context, expectedOutput,
-                inheritedSkill, parentFacts.factSlice()));
+                inheritedSkill, factSlice));
 
-        FactsStore.MergeResult factMerge = parentFacts.mergeChild(result.facts(), agentId);
-        SearchLog.MergeResult searchMerge = parentSearchLog.merge(result.searches());
+        FactsStore.MergeResult factMerge;
+        SearchLog.MergeResult searchMerge;
+        synchronized (parentFacts) {
+            factMerge = parentFacts.mergeChild(result.facts(), agentId);
+        }
+        synchronized (parentSearchLog) {
+            searchMerge = parentSearchLog.merge(result.searches());
+        }
         Path reportPath = workspace.resolve("final-report.md");
         Files.writeString(reportPath, result.answer());
         reports.add(agentId, variant, reportPath, factMerge.conflicts());
-        System.out.println(Console.tool("[delegate_agent] 子Agent " + agentId + " 完成：事实新增 "
+        AgentOutput.println(Console.tool("[delegate_agent] 子Agent " + agentId + " 完成：事实新增 "
                 + factMerge.added() + " / 冲突 " + factMerge.conflicts().size()
                 + "，检索新增 " + searchMerge.added()));
 

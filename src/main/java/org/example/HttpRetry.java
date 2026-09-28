@@ -47,7 +47,7 @@ final class HttpRetry {
                 if (i == MAX_RETRIES || !retryable(e)) {
                     throw e;
                 }
-                System.out.println(Console.warn("[llm] " + brief(e) + "，" + (1000L << i) + "ms 后第 "
+                AgentOutput.println(Console.warn("[llm] " + brief(e) + "，" + (1000L << i) + "ms 后第 "
                         + (i + 2) + " 次尝试…"));
                 Thread.sleep(1000L << i);
             }

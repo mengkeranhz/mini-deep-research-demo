@@ -14,11 +14,11 @@ public final class SubAgentStore {
 
     private final List<Report> reports = new ArrayList<>();
 
-    public void add(String agentId, String variant, Path path, List<String> conflicts) {
+    public synchronized void add(String agentId, String variant, Path path, List<String> conflicts) {
         reports.add(new Report(agentId, variant, path, List.copyOf(conflicts)));
     }
 
-    public String snapshot() {
+    public synchronized String snapshot() {
         if (reports.isEmpty()) {
             return null;
         }
@@ -26,6 +26,7 @@ public final class SubAgentStore {
         for (Report r : reports) {
             sb.append("- ").append(r.agentId())
                     .append(" | 报告: ").append(r.path())
+                    .append(" | 日志: ").append(r.path().getParent().resolve("agent.log.md"))
                     .append(r.conflicts().isEmpty() ? "" : " | 事实冲突待复核")
                     .append('\n');
         }
@@ -33,7 +34,7 @@ public final class SubAgentStore {
         return sb.toString();
     }
 
-    public String verificationSection() {
+    public synchronized String verificationSection() {
         if (reports.isEmpty()) {
             return null;
         }

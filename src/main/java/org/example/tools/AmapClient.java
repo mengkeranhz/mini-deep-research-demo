@@ -2,6 +2,7 @@ package org.example.tools;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.AgentOutput;
 import org.example.Console;
 
 import java.net.URLEncoder;
@@ -20,7 +21,7 @@ public final class AmapClient {
 
     private final String key;
     private final long minIntervalMs;
-    private long lastRequestAt;
+    private static long lastRequestAt;
 
     public AmapClient(String key, long minIntervalMs) {
         this.key = key;
@@ -40,7 +41,7 @@ public final class AmapClient {
             }
         });
         for (int attempt = 0; ; attempt++) {
-            throttle();
+            throttle(minIntervalMs);
             JsonNode root = MAPPER.readTree(Http.getString(url.toString()));
             // v3 接口失败时 status="0" + info，v4 接口失败时 errcode!=0 + errmsg
             String err = "0".equals(root.path("status").asText(null))
@@ -51,7 +52,7 @@ public final class AmapClient {
                 return root;
             }
             if (err.contains("QPS_HAS_EXCEEDED") && attempt < QPS_RETRIES) {
-                System.out.println(Console.warn("[amap] QPS 超限，" + (1000L << attempt) + "ms 后第 "
+                AgentOutput.println(Console.warn("[amap] QPS 超限，" + (1000L << attempt) + "ms 后第 "
                         + (attempt + 2) + " 次尝试…"));
                 Thread.sleep(1000L << attempt);
                 continue;
@@ -61,8 +62,8 @@ public final class AmapClient {
     }
 
     /** 简单节流：相邻两次请求间隔不小于 minIntervalMs（默认 350ms ≈ 3 QPS 以内）。 */
-    private synchronized void throttle() throws InterruptedException {
-        long wait = lastRequestAt + minIntervalMs - System.currentTimeMillis();
+    private static synchronized void throttle(long intervalMs) throws InterruptedException {
+        long wait = lastRequestAt + intervalMs - System.currentTimeMillis();
         if (wait > 0) {
             Thread.sleep(wait);
         }

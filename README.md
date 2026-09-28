@@ -6,7 +6,7 @@
 
 ### Agent 循环（`Agent`）
 
-每轮执行：**轮次上限（90）→ 注入任务进度与事实账本快照 → LLM 调用（人格 + 工具元信息 + 对话与 thinking 回传）→ 终答闸门或依次执行工具 → 超阈值压缩上下文**。
+每轮执行：**轮次上限（90）→ 注入任务进度与事实账本快照 → LLM 调用（人格 + 工具元信息 + 对话与 thinking 回传）→ 终答闸门或执行工具（普通工具顺序执行，同批 `delegate_agent` 并发执行）→ 超阈值压缩上下文**。
 
 - **外部状态每轮注入**：任务清单（`TaskStore`）与事实账本（`FactsStore`）存放在 LLM 上下文之外，每轮重算紧凑快照作为系统块注入，不留旧快照、天然无陈旧堆积
 - **上下文压缩**：上次响应 inputTokens 超 60,000 时，用无工具单次调用把对话稿总结为摘要，重建上下文 = 原始述求 + 摘要 + 事实账本（声明为最终权威）+ 旧草稿（仅供结构参考）+ 继续指令——账本跨压缩保留，防止被陈旧草稿锚定
@@ -15,12 +15,13 @@
 
 - `analyze_query` 把述求解析为任务清单与**数据覆盖目标**（`required_facts`：维度 × 时期逐格枚举，成为最终答案的覆盖度检查表）；`update_task` 标记进度；发现新信息可再次 `analyze_query` 重新规划（首次规划固化为校验基线，重规划不改变判断基准）
 
-### 顺序子 Agent
+### 并发子 Agent
 
-- `delegate_agent` 阻塞式运行一个边界清晰的子任务：子 Agent 复用模型与工具配置，但拥有独立任务计划、事实账本、检索日志、技能状态与 `subagents/<agent-id>/` 文件目录；父账本会生成机器只读事实切片，子 Agent 不依赖父模型手写事实 context
+- `delegate_agent` 运行一个边界清晰的子任务：子 Agent 复用模型与工具配置，但拥有独立任务计划、事实账本、检索日志、技能状态与 `subagents/<agent-id>/` 文件目录；父账本会生成机器只读事实切片，子 Agent 不依赖父模型手写事实 context
+- 同一轮的多个 `delegate_agent` 会并发执行（最多 4 个），事实 / 检索 / 报告在各自子任务完成后按互斥锁合并回父 Agent；父 Agent 控制台只输出委派启动与汇总结果
 - 多版本 / 多方案 / 多情景任务按「一个最终交付物实例一个子 Agent」委派，并通过 `variant` 标明版本名；子 Agent 内部再自行 `analyze_query`
-- 子 Agent 继承父 Agent 的检索日志与当前技能，不能向用户提问，也不能递归调用 `delegate_agent`；默认 60 轮，必须通过自己的 `final_answer` 闸门
-- 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent，最终报告另存为 `subagents/<agent-id>/final-report.md`：同 key 证据不互相覆盖；数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
+- 子 Agent 继承父 Agent 的检索日志与当前技能，不能向用户提问，也不能递归调用 `delegate_agent`（父子工具均使用显式白名单）；默认 60 轮，必须通过自己的 `final_answer` 闸门
+- 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent，最终报告另存为 `subagents/<agent-id>/final-report.md`，过程日志追加在 `subagents/<agent-id>/agent.log.md`：同 key 证据不互相覆盖；数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
 
 ### 事实账本
 
@@ -37,7 +38,7 @@
 
 ## 内置工具
 
-`org.example.tools` 包下的实现类自动扫描注册，新增工具只需实现 `AgentTool` 接口，无需改动注册逻辑。
+`org.example.tools` 包下的实现类自动扫描，但必须进入 `ToolRegistry.ROOT_TOOL_NAMES` 或 `ToolRegistry.SUB_AGENT_TOOL_NAMES` 白名单才会注册。
 
 | 工具 | 说明 |
 | --- | --- |
@@ -105,7 +106,6 @@ Anthropic 协议实现支持流式 SSE 与 thinking 块回传，可替换任意�
 src/main/java/org/example/
 ├── Main.java            # 入口：读入述求，运行 Agent，打印结论
 ├── Agent.java           # Agent 循环 + 终答闸门 + 上下文压缩
-├── DelegateAgentTool.java # 顺序子 Agent 委派与结果合并
 ├── SubAgentStore.java    # 子 Agent 报告路径与汇总核对状态
 ├── SystemPrompt.java    # 人格提示词（目标 / 准则 / 输出要求 / 边界）
 ├── TaskStore.java       # 任务清单与校验基线（外部状态）
@@ -114,5 +114,5 @@ src/main/java/org/example/
 ├── LlmClient.java       # LLM 抽象接口（anthropic / openai）
 ├── AnthropicClient.java # Anthropic 协议：流式 SSE、thinking、tool_use
 ├── OpenAiClient.java    # OpenAI 协议实现
-└── tools/               # 全部内置工具（自动扫描注册）
+└── tools/               # 全部内置工具（自动扫描，按父/子白名单注册）
 ```

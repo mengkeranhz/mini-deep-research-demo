@@ -160,7 +160,7 @@ final class AnthropicClient implements LlmClient {
                             // 异常收尾（max_tokens 截断 / refusal 拒答等）就地亮明，别让它无声滑过
                             if (!"end_turn".equals(sr) && !"tool_use".equals(sr)
                                     && !"stop_sequence".equals(sr)) {
-                                System.out.println(Console.warn("[stop_reason] " + sr));
+                                AgentOutput.println(Console.warn("[stop_reason] " + sr));
                             }
                         }
                     }
@@ -193,11 +193,11 @@ final class AnthropicClient implements LlmClient {
         switch (delta.path("type").asText()) {
             case "text_delta" -> {
                 b.put("text", b.path("text").asText("") + delta.path("text").asText());
-                System.out.print(delta.path("text").asText());
+                AgentOutput.print(delta.path("text").asText());
             }
             case "thinking_delta" -> {
                 b.put("thinking", b.path("thinking").asText("") + delta.path("thinking").asText());
-                System.out.print(Console.thinking(delta.path("thinking").asText()));
+                AgentOutput.print(Console.thinking(delta.path("thinking").asText()));
             }
             case "signature_delta" ->
                     b.put("signature", b.path("signature").asText("") + delta.path("signature").asText());

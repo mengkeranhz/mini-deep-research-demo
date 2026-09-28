@@ -117,12 +117,12 @@ final class OpenAiClient implements LlmClient {
                 String think = delta.path("reasoning_content").asText("");
                 if (!think.isEmpty()) {
                     thinking.append(think);
-                    System.out.print(Console.thinking(think));
+                    AgentOutput.print(Console.thinking(think));
                 }
                 String chunk = delta.path("content").asText("");
                 if (!chunk.isEmpty()) {
                     text.append(chunk);
-                    System.out.print(chunk);
+                    AgentOutput.print(chunk);
                 }
                 for (JsonNode tc : delta.path("tool_calls")) {
                     ObjectNode call = calls.computeIfAbsent(tc.path("index").asInt(0), i -> M.createObjectNode());
