@@ -29,9 +29,12 @@ final class OpenAiClient implements LlmClient {
             .build();
 
     private final Config.Llm cfg;
+    /** 静默客户端：流式但不实时打印文本/思考增量（终答校验等嵌套调用用）；与 AnthropicClient 同语义。 */
+    private final boolean silent;
 
-    OpenAiClient(Config.Llm cfg) {
+    OpenAiClient(Config.Llm cfg, boolean silent) {
         this.cfg = cfg;
+        this.silent = silent;
     }
 
     @Override
@@ -117,12 +120,16 @@ final class OpenAiClient implements LlmClient {
                 String think = delta.path("reasoning_content").asText("");
                 if (!think.isEmpty()) {
                     thinking.append(think);
-                    AgentOutput.print(Console.thinking(think));
+                    if (!silent) {
+                        AgentOutput.print(Console.thinking(think));
+                    }
                 }
                 String chunk = delta.path("content").asText("");
                 if (!chunk.isEmpty()) {
                     text.append(chunk);
-                    AgentOutput.print(chunk);
+                    if (!silent) {
+                        AgentOutput.print(chunk);
+                    }
                 }
                 for (JsonNode tc : delta.path("tool_calls")) {
                     ObjectNode call = calls.computeIfAbsent(tc.path("index").asInt(0), i -> M.createObjectNode());

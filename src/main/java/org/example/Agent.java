@@ -63,7 +63,7 @@ public class Agent {
     private final int maxRounds;
     private final String systemPrompt;
     private final LlmClient llm;
-    private final LlmClient quietLlm; // 无工具、非流式：最终校验等嵌套调用用
+    private final LlmClient quietLlm; // 无工具、流式但静默（不打增量）：最终校验等嵌套调用用
     private final ToolRegistry registry;
     private final TaskStore tasks;
     private final FactsStore facts;
@@ -89,9 +89,13 @@ public class Agent {
                 ? SystemPrompt.withSkills()
                 : SystemPrompt.subAgentWithSkills();
         this.llm = LlmClient.create(cfg.llm());
-        this.quietLlm = LlmClient.create(new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
+        // 静默客户端改为流式：非流式下 300s 请求超时覆盖整包生成（含 thinking 长思考），
+        // 校验大终稿（20KB+ 全量账本）时曾 4 次全量重试超时打崩任务；流式（ofLines）超时只计到
+        // 响应头，思考再长也不撞上限。silent=true 保持安静不打增量；thinking 档位与主客户端一致。
+        Config.Llm quietCfg = new Config.Llm(cfg.llm().provider(), cfg.llm().baseUrl(),
                 cfg.llm().model(), cfg.llm().apiKey(), cfg.llm().maxTokens(), cfg.llm().temperature(),
-                cfg.llm().topP(), false, cfg.llm().thinking(), cfg.llm().contextTokenThreshold()));
+                cfg.llm().topP(), true, cfg.llm().thinking(), cfg.llm().contextTokenThreshold());
+        this.quietLlm = LlmClient.create(quietCfg, true);
         this.contextTokenThreshold = cfg.llm().contextTokenThreshold();
 
         // 外部状态是“LLM 看不到的账本”：每轮由 Agent 重新注入快照，避免依赖对话记忆。

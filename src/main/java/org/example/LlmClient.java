@@ -5,7 +5,8 @@ import java.util.List;
 /**
  * LLM 客户端中立接口；按配置 provider 创建 anthropic / openai 协议实现。
  * messages 含四种角色（system/user/assistant/tool），协议差异由各实现负责映射。
- * 流式时文本与思考增量均实时打到 stdout（思考以青色区分）；非流式由调用方统一打印。
+ * 流式时文本与思考增量均实时打到 stdout（思考以青色区分）；非流式由调用方统一打印；
+ * silent 客户端（create(cfg, true)）流式但不打增量，供终答校验等嵌套调用用。
  */
 public interface LlmClient {
 
@@ -22,12 +23,17 @@ public interface LlmClient {
     }
 
     static LlmClient create(Config.Llm cfg) {
+        return create(cfg, false);
+    }
+
+    /** silent=true 创建静默客户端：流式但不实时打印增量（终答校验等嵌套调用用）。 */
+    static LlmClient create(Config.Llm cfg, boolean silent) {
         if (cfg.apiKey().isBlank()) {
             throw new IllegalStateException("config.yaml 中 llm.api-key 为空（检查对应环境变量是否设置）");
         }
         return switch (cfg.provider()) {
-            case "anthropic" -> new AnthropicClient(cfg);
-            case "openai" -> new OpenAiClient(cfg);
+            case "anthropic" -> new AnthropicClient(cfg, silent);
+            case "openai" -> new OpenAiClient(cfg, silent);
             default -> throw new IllegalStateException(
                     "不支持的 provider: " + cfg.provider() + "（可选 anthropic / openai）");
         };

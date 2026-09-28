@@ -33,9 +33,12 @@ final class AnthropicClient implements LlmClient {
             .build();
 
     private final Config.Llm cfg;
+    /** 静默客户端：流式但不实时打印文本/思考增量（终答校验等嵌套调用用）；HttpRetry 重试与异常告警不受影响。 */
+    private final boolean silent;
 
-    AnthropicClient(Config.Llm cfg) {
+    AnthropicClient(Config.Llm cfg, boolean silent) {
         this.cfg = cfg;
+        this.silent = silent;
     }
 
     @Override
@@ -185,19 +188,23 @@ final class AnthropicClient implements LlmClient {
         return new LlmResponse(blocks, usage[0], usage[1], cacheRead[0]);
     }
 
-    /** 按 delta 类型累积到块上，文本/思考增量同时实时打印。 */
-    private static void accumulate(ObjectNode b, JsonNode delta) {
+    /** 按 delta 类型累积到块上；非静默客户端文本/思考增量同时实时打印。 */
+    private void accumulate(ObjectNode b, JsonNode delta) {
         if (b == null) {
             return;
         }
         switch (delta.path("type").asText()) {
             case "text_delta" -> {
                 b.put("text", b.path("text").asText("") + delta.path("text").asText());
-                AgentOutput.print(delta.path("text").asText());
+                if (!silent) {
+                    AgentOutput.print(delta.path("text").asText());
+                }
             }
             case "thinking_delta" -> {
                 b.put("thinking", b.path("thinking").asText("") + delta.path("thinking").asText());
-                AgentOutput.print(Console.thinking(delta.path("thinking").asText()));
+                if (!silent) {
+                    AgentOutput.print(Console.thinking(delta.path("thinking").asText()));
+                }
             }
             case "signature_delta" ->
                     b.put("signature", b.path("signature").asText("") + delta.path("signature").asText());
