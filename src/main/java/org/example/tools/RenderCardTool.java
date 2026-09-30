@@ -52,7 +52,7 @@ public class RenderCardTool implements AgentTool {
                         + "markdown 中的图片只用可外链的开放图源（unsplash、高德 POI 图 store.is.autonavi.com 均已实测可渲染，pixabay 等开放直链亦可）；"
                         + "pngtree/alamy/shutterstock 等图库站直链会被防盗链拦截，渲染服务端抓不到图会静默丢失"
                         + "（不报错、不留占位），一律不用。"
-                        + "常用主题：xiaohongshu（小红书风，旅行/探店）、apple-notes（通用笔记）、"
+                        + "常用主题：xiaohongshu（小红书风，内容种草）、apple-notes（通用笔记）、"
                         + "nature（清新自然）、darktech（技术）、business（商务）。"
                         + "用户指定风格或常用主题不合适时，先 read_file docs/render-card-themes.md "
                         + "读完整主题表（23 套主题的适用场景、theme_mode 可选值、type 尺寸预设），再选 theme 与 theme_mode。"

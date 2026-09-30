@@ -44,6 +44,12 @@ public class AnalyzeQueryTool implements AgentTool {
              - 多版本规则：若述求要求多个并列版本 / 方案 / 情景，tasks 必须以「每个版本一份完整交付物」为第一拆分维度，
                至少为每个版本安排一个独立方案任务；required_facts 的 dimension 须使用「版本名·指标维度」，
                不要使用冒号或其他分隔符。
+               还必须区分公用事实与版本决策：公用事实只进共享背景/校验口径；版本契约标明的决策变量
+               不得在共享 constraints 中预先裁决。每个版本任务的研究/检索策略应体现该版本目标；
+               汇总任务必须包含版本分离核验。
+             - 多版本 required_facts 除各版本事实目标外，应包含可核验的版本决策证据与分离指标；
+               具体维度由用户述求、研究对象和已加载技能推导，时期可用自然时期（如“最终方案”）。
+               不要为所有版本生成完全同质的检索目标。
             示例（输入「查深圳最近2年每季度的GDP增速和新能源汽车保有量」）：
             {"constraints":["地区：深圳","时间范围：最近2年","频率：季度"],"unknowns":["新能源汽车保有量是否只按年度发布"],"plan":"先确认各指标发布频率与口径，再按各自粒度检索","required_facts":[{"dimension":"GDP增速","periods":["2024","2024-Q1","2024-Q2","2024-Q3","2024-Q4","2025","2025-Q1","2025-Q2","2025-Q3","2025-Q4"]},{"dimension":"新能源汽车保有量","periods":["2024","2025"]}],"tasks":[{"content":"查深圳GDP季度增速官方数据","depends_on":[]},{"content":"查深圳新能源汽车保有量年度数据","depends_on":[]},{"content":"汇总对比两项指标变化","depends_on":[1,2]}]}
             """;
@@ -156,7 +162,7 @@ public class AnalyzeQueryTool implements AgentTool {
             o.put("status", t.status());
         }
         // 回执尾巴：技能模式下不再推送 locate_sources/domains 的通用检索指令——
-        // 技能自有信源管线约定（如 travel-viral-guide 的双管线），两条祈使句并存会互相打架
+        // 技能自有信源管线约定（如双管线检索），两条祈使句并存会互相打架
         String tail = skill == null
                 ? "\n任务清单与数据覆盖目标已保存。请从「可执行」的任务开始执行；开始或完成时调用 update_task 更新状态，"
                         + "首次 web_search 之前先调用 locate_sources 定位本主题的权威来源域名，"

@@ -40,15 +40,16 @@ public class Agent {
 
     /** 最终校验器提示词：只有五类 BLOCKER 能打回；补充性意见归 SUGGESTION，不阻塞。 */
     private static final String VERIFY_PROMPT = """
-            你是答案质量校验器，按「够用即可」原则裁决：只有以下四类 BLOCKER 才能判不通过——
+            你是答案质量校验器，按「够用即可」原则裁决：只有以下五类 BLOCKER 才能判不通过——
             1. 事实错误：草稿的数据/结论与「事实账本」矛盾，或断言了账本与校验依据都不支撑的确定性事实；
             2. 账本矛盾/遗漏：草稿声称「未找到/未检索到 X」而账本中 X 为 found/proxy；账本 found 的关键事实被草稿写错或遗漏；
-            3. 硬约束违反：「校验依据」中可判定的硬约束未满足；
+            3. 硬约束违反：「校验依据」中可判定的硬约束未满足；多版本任务缺少任务/技能定义的版本分离指标、
+               指标无产物/账本证据、或未达到任务契约设定的分离要求；
             4. 关键缺口未声明：述求要求的核心内容缺失且草稿未如实说明原因；账本 status=not_found 的条目草稿未如实交代；
             5. 技能/关键依赖违反：未满足已加载技能的可判定输出骨架或终检要求；critical 且非 found 的依赖被用作主方案唯一支撑，
                而没有采用保守主方案并写明升级条件。
             裁决规则：
-            - 交付形态合法：最终交付物为磁盘文件（如 Markdown 路书）时，「文件路径+摘要+关键结论」是合法答案形态；
+            - 交付形态合法：最终交付物为磁盘文件（如 Markdown 报告）时，「文件路径+摘要+关键结论」是合法答案形态；
               「答案里没列来源/没贴完整内容/没给样例」不构成缺陷——只要文件内容已按校验依据与账本覆盖即可。
             - 补充性/展示性意见（可以更详细、可加 Plan B、可补来源清单、措辞可优化、可再交叉验证等）一律不阻塞，最多写入 SUGGESTION。
             - 没有 BLOCKER 就判 PASS，不追求完美、不主动加码要求。
@@ -598,6 +599,7 @@ public class Agent {
         String ledger = facts.ledger();
         Skill skill = skillState.get();
         String reports = subAgentReports.verificationSection();
+        String multiVersion = subAgentReports.multiVersionVerificationSection();
         if (criteria == null && ledger == null && skill == null && reports == null) {
             return null;
         }
@@ -642,6 +644,9 @@ public class Agent {
         }
         if (reports != null) {
             basis = basis + "\n\n" + reports;
+        }
+        if (multiVersion != null) {
+            basis = basis + "\n\n" + multiVersion;
         }
         LlmResponse verification = verify(draft, basis);
         String verdict = verification.text();

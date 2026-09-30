@@ -37,7 +37,7 @@ public class RecordFactsTool implements AgentTool {
                         + "回执区分新增/覆盖更新/无变化——无变化=数据已在账本，直接复用，不要重复检索。"
                         + "status: found=官方或已交叉核验；proxy=代理指标/第三方折算（note 写折算方法）；"
                         + "not_found=确认检索不到（note 必须写明已尝试的检索关键词与来源，否则视为放弃过早）。"
-                        + "住宿可订、道路通行、放票、闭馆等主计划关键依赖应传 critical=true；"
+                        + "会影响主计划成立的关键依赖（如预约、库存、通行、营业状态）应传 critical=true；"
                         + "critical 且非 found 时，note 必须同时写「保守主方案：」和「升级条件：」。",
                 Map.of("type", "object",
                         "properties", Map.of(

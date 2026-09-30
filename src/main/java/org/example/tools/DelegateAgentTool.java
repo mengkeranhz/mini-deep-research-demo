@@ -55,7 +55,9 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
     public ToolDef definition() {
         Map<String, Object> properties = new LinkedHashMap<>();
         properties.put("task", Map.of("type", "string",
-                "description", "边界清晰的子任务完整描述，必须自包含"));
+                "description", """
+                        边界清晰的子任务完整描述，必须自包含。指定 variant 时还必须携带版本契约、
+                        本版本可独立裁决的决策变量、差异约束和版本专属研究/检索策略"""));
         properties.put("variant", Map.of("type", "string", "description", """
                 子 Agent 负责的方案版本名。用户要求多个并列版本 / 方案 / 情景时必填，
                 单版本任务可省略"""));
@@ -70,7 +72,9 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                         "periods", Map.of("type", "array", "items", Map.of("type", "string"))),
                         "required", List.of("dimension", "periods"))));
         properties.put("context", Map.of("type", "string",
-                "description", "父任务背景，可选；不要手写事实数值，父事实账本会机器生成只读切片自动传给子 Agent"));
+                "description", """
+                        父任务背景，可选；不要手写事实数值，父事实账本会机器生成只读切片自动传给子 Agent。
+                        多版本任务只允许描述公用事实、保护约束和评价口径；不得下传版本契约标明的版本决策"""));
         properties.put("expected_output", Map.of("type", "string",
                 "description", "期望的子任务输出格式与完成标准，可选"));
         properties.put("max_rounds", Map.of("type", "integer",
@@ -82,6 +86,7 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 并把事实与检索记录按来源 Agent 合并回父 Agent。同一轮的多个 delegate_agent 会并发执行；
                 子 Agent 日志写入 subagents/<agent-id>/agent.log.md。不要用于简单事实查询；
                 多个并列版本 / 方案 / 情景必须一个版本一个子 Agent，并传 variant。
+                多版本的公用事实可以共享；版本决策变量必须由各 variant 独立推导并在报告中给出可核验证据。
                 调用前应将对应父任务标为 in_progress，收到结果并确认无冲突后再 update_task。
                 """, Map.of("type", "object", "properties", properties,
                 "required", List.of("task")));
@@ -93,6 +98,7 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         String variant = normalize(ToolRegistry.optStr(input, "variant"));
         List<String> constraints = strings(input, "constraints");
         Map<String, List<String>> requiredFacts = requiredFacts(input, variant);
+        requiredFacts = withVariantDecisionTarget(variant, requiredFacts);
         String context = ToolRegistry.optStr(input, "context");
         String expectedOutput = ToolRegistry.optStr(input, "expected_output");
         int maxRounds = clamp(ToolRegistry.optInt(input, "max_rounds",
@@ -150,6 +156,20 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         if (variant != null) {
             request.append("\n## 唯一方案版本\n").append(variant)
                     .append("\n你负责且只负责这个版本的完整交付物；禁止规划、参考或假设其他兄弟版本。\n");
+            request.append("""
+
+                    ## 版本决策变量隔离
+                    任务契约标明的版本决策变量由你独立推导，不得因常见做法、公用事实或其他版本的通常选择直接沿用。
+                    公用事实只用于可行性校验和事实对账，不能替代版本决策。
+
+                    ## 版本差异约束
+                    按版本契约给出可核验的差异证据，并说明已选方案和被拒绝的替代方案及理由；
+                    不得只调整表面参数而保留实质相同的方案结构。
+
+                    ## 版本专属研究/检索
+                    若契约要求专属检索策略，必须使用本版本目标驱动的查询族，不能只复用所有版本相同的一般性查询。
+                    检索结果应进入可比方案假设。
+                    """);
         }
         request.append("\n## 子任务\n")
                 .append(task);
@@ -189,7 +209,9 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 3. 不向用户提问；信息不足时明确假设，或用 status=not_found 写明已尝试方式。
                 4. 不要扩展到父任务全貌，也不要假设兄弟子任务结论。
                 5. 若指定唯一方案版本，最终报告必须仅覆盖该版本的完整计划、数据、预算与风险。
-                6. 完成时必须调用 final_answer 提交完整子任务报告。
+                6. 若指定唯一方案版本，最终报告还必须包含版本决策账本：契约标明的决策变量、
+                   已选方案、被拒替代方案和版本差异证据，并按 required_facts 入账。
+                7. 完成时必须调用 final_answer 提交完整子任务报告。
                 """);
         return request.toString();
     }
@@ -247,6 +269,20 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 out.putIfAbsent(dimension, periods);
             }
         }
+        return out;
+    }
+
+    /**
+     * 多版本子任务自动追加一条通用的“决策证据”覆盖目标。
+     * 这里不预设任何领域决策维度；具体指标由版本契约、用户述求和已加载技能提供。
+     */
+    private static Map<String, List<String>> withVariantDecisionTarget(
+            String variant, Map<String, List<String>> supplied) {
+        if (variant == null) {
+            return supplied;
+        }
+        Map<String, List<String>> out = new LinkedHashMap<>(supplied);
+        out.putIfAbsent(scopedDimension(variant, "版本决策与差异证据"), List.of("最终方案"));
         return out;
     }
 

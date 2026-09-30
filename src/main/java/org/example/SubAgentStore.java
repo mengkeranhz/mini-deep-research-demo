@@ -31,6 +31,10 @@ public final class SubAgentStore {
                     .append('\n');
         }
         sb.append("汇总前可按需 read_file 报告文件；但写进最终答案的数据必须能在事实账本找到。\n");
+        if (hasMultipleVariants()) {
+            sb.append("检测到多个并列版本：汇总前必须逐版 read_file/核对报告，执行任务/技能定义的版本分离指标，")
+                    .append("不能只按版本名概括差异。\n");
+        }
         return sb.toString();
     }
 
@@ -45,5 +49,33 @@ public final class SubAgentStore {
             sb.append("- ").append(r.agentId()).append(" 报告文件: ").append(r.path()).append('\n');
         }
         return sb.toString();
+    }
+
+    /** 是否已有多个并列版本报告，父 Agent 终检需要做跨版本分离核验。 */
+    public synchronized boolean hasMultipleVariants() {
+        return reports.stream()
+                .map(Report::variant)
+                .filter(v -> v != null && !v.isBlank())
+                .distinct()
+                .count() > 1;
+    }
+
+    /** 多版本终检的通用核验提示；领域指标由任务基线与已加载技能提供。 */
+    public synchronized String multiVersionVerificationSection() {
+        if (!hasMultipleVariants()) {
+            return null;
+        }
+        return """
+                # 多版本分离核验（必须逐项复核）
+                版本报告：%s
+                终稿必须执行「版本分离核验」，按任务基线与已加载技能列出的指标逐项给出数值、
+                PASS/FAIL 或可比证据；若任务未定义领域指标，至少比较各版本目标、契约标明的决策变量、
+                产物结构和用户可感知差异。
+                缺项、只有自述无证据、或未达到任务契约设定，均为 BLOCKER；先回炉重排版本决策变量。
+                """.formatted(reports.stream()
+                .map(Report::variant)
+                .filter(v -> v != null && !v.isBlank())
+                .distinct()
+                .toList());
     }
 }
