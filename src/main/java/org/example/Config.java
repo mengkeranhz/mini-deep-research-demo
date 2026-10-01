@@ -37,8 +37,11 @@ public final class Config {
     /** minRequestIntervalMs：相邻两次高德请求的最小间隔（毫秒），防 QPS 超限。 */
     public record Lbs(String amapApiKey, int minRequestIntervalMs) {}
 
-    /** 文件保存/读取根目录。rootDir 为空时回退：工作目录 → 项目目录。 */
-    public record Storage(String rootDir) {}
+    /**
+     * 文件保存/读取根目录与审计归档目录。
+     * rootDir 为空时回退：工作目录 → 项目目录；auditDir 为空时使用 rootDir/runs。
+     */
+    public record Storage(String rootDir, String auditDir) {}
 
     /** read-file 工具：关键词检索默认返回的段落数。 */
     public record ReadFile(int maxResults) {}
@@ -76,7 +79,7 @@ public final class Config {
                         str(webSearch, "bocha-api-key"),
                         intVal(webSearch, "max-results", 30)),
                 new Lbs(str(lbs, "amap-api-key"), intVal(lbs, "min-request-interval-ms", 350)),
-                new Storage(str(storage, "root-dir")),
+                new Storage(str(storage, "root-dir"), str(storage, "audit-dir")),
                 new ReadFile(intVal(readFile, "max-results", 30)),
                 new RenderCard(
                         str(renderCard, "md2card-api-key"),

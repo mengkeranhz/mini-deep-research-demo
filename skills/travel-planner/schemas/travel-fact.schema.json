@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mini-deep-research:travel-planner:travel-fact:v1",
+  "title": "Travel planner domain fact",
+  "description": "A structured fact recorded by the travel-planner skill. The base fact ledger remains generic; this schema describes travel-specific payloads.",
+  "type": "object",
+  "required": ["record_type", "dimension", "period", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "record_type": {
+      "type": "string",
+      "enum": ["place", "route", "anchor", "duration_budget", "constraint", "risk", "itinerary_snapshot", "other"]
+    },
+    "dimension": {"type": "string", "minLength": 1},
+    "period": {"type": "string", "minLength": 1},
+    "metric": {"type": "string"},
+    "status": {"type": "string", "enum": ["found", "proxy", "not_found"]},
+    "value": {
+      "description": "Human-readable summary; structured details stay in the sibling fields.",
+      "type": "string"
+    },
+    "source": {"$ref": "#/$defs/evidence"},
+    "place": {"$ref": "#/$defs/place"},
+    "route": {"$ref": "#/$defs/route"},
+    "anchor": {"$ref": "#/$defs/anchor"},
+    "duration_budget": {"$ref": "#/$defs/duration_budget"},
+    "constraint": {"$ref": "#/$defs/constraint"},
+    "risk": {"$ref": "#/$defs/risk"},
+    "itinerary_snapshot": {"$ref": "#/$defs/itinerary_snapshot"},
+    "extensions": {"type": "object", "additionalProperties": true}
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "source_type": {"type": "string"},
+        "name": {"type": "string"},
+        "url": {"type": "string"},
+        "published_at": {"type": "string"},
+        "retrieved_at": {"type": "string"},
+        "quote": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["official", "high", "medium", "low"]}
+      }
+    },
+    "geo": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "longitude": {"type": "number", "minimum": -180, "maximum": 180},
+        "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+        "altitude_m": {"type": "number"},
+        "coordinate_source": {"type": "string"}
+      }
+    },
+    "place": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "kind": {"type": "string"},
+        "region": {"type": "string"},
+        "geo": {"$ref": "#/$defs/geo"},
+        "ticket": {"type": "object", "additionalProperties": true},
+        "visit_duration": {"type": "string", "pattern": "^P(T|$)"},
+        "reservation_required": {"type": "boolean"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": ["from", "to", "transport_mode"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"type": "string"},
+        "from": {"type": "string"},
+        "to": {"type": "string"},
+        "transport_mode": {"type": "string"},
+        "distance": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?\\s*(km|m)$"},
+        "duration": {"type": "string", "pattern": "^PT"},
+        "road": {"type": "string"},
+        "condition": {"type": "string"},
+        "measurement": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "tool": {"type": "string"},
+            "measured_at": {"type": "string"},
+            "method": {"type": "string"}
+          }
+        },
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["opening_hours", "last_entry", "reservation", "ticket", "road_condition", "flight", "sunrise_sunset", "weather", "other"]
+        },
+        "value": {"type": "string"},
+        "timezone": {"type": "string"},
+        "effective_period": {"type": "string"},
+        "critical": {"type": "boolean"},
+        "fallback": {"type": "string"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "duration_budget": {
+      "type": "object",
+      "required": ["subject", "context"],
+      "additionalProperties": true,
+      "properties": {
+        "subject": {"type": "string"},
+        "context": {"type": "string"},
+        "normal": {"type": "string", "pattern": "^PT"},
+        "compressed": {"type": "string", "pattern": "^PT"},
+        "minimum": {"type": "string", "pattern": "^PT"},
+        "maximum": {"type": "string", "pattern": "^PT"},
+        "preconditions": {"type": "array", "items": {"type": "string"}},
+        "reasoning": {"type": "string"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "required": ["subject", "rule", "scope"],
+      "additionalProperties": true,
+      "properties": {
+        "subject": {"type": "string"},
+        "rule": {"type": "string"},
+        "scope": {"type": "string"},
+        "invariant": {"type": "boolean"},
+        "failure_mode": {"type": "string"},
+        "verification": {"type": "string"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "risk": {
+      "type": "object",
+      "required": ["risk", "impact", "response"],
+      "additionalProperties": true,
+      "properties": {
+        "risk": {"type": "string"},
+        "likelihood": {"type": "string"},
+        "impact": {"type": "string"},
+        "trigger": {"type": "string"},
+        "response": {"type": "string"},
+        "fallback": {"type": "string"},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "itinerary_snapshot": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "trip_id": {"type": "string"},
+        "variant": {"type": "string"},
+        "day": {"type": "string"},
+        "node_sequence": {"type": "array", "items": {"type": "string"}},
+        "lodging_sequence": {"type": "array", "items": {"type": "string"}},
+        "artifact_path": {"type": "string"},
+        "schema": {"type": "string"}
+      }
+    }
+  }
+}

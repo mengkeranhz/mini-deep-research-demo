@@ -86,6 +86,44 @@ public class TaskStore {
         return sb.toString();
     }
 
+    /** 完整任务账本：固定基线 + 当前规划头 + 逐任务全文与备注，用于磁盘归档。 */
+    public String ledger() {
+        if (tasks.isEmpty() && header == null && baseline == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder("# 任务进度账本\n\n")
+                .append("- 进度: ").append(progress()).append('\n')
+                .append("- 生成时间: ").append(java.time.LocalDateTime.now()).append("\n\n");
+        String fixed = baseline();
+        if (fixed != null) {
+            sb.append(fixed).append('\n');
+        }
+        if (header != null) {
+            sb.append("## 当前规划\n");
+            if (!header.plan().isBlank()) {
+                sb.append("- 总体计划: ").append(header.plan()).append('\n');
+            }
+            header.constraints().forEach(c -> sb.append("- 硬约束: ").append(c).append('\n'));
+            header.unknowns().forEach(u -> sb.append("- 信息缺口: ").append(u).append('\n'));
+            sb.append('\n');
+        }
+        if (!tasks.isEmpty()) {
+            sb.append("## 任务明细\n");
+            for (Task t : tasks) {
+                sb.append("### ").append(t.id()).append(" [").append(label(t.status())).append("]\n")
+                        .append("- 内容: ").append(t.content()).append('\n');
+                if (!t.dependsOn().isEmpty()) {
+                        sb.append("- 依赖: ").append(String.join("、", t.dependsOn())).append('\n');
+                }
+                if (t.note() != null && !t.note().isBlank()) {
+                        sb.append("- 备注: ").append(t.note()).append('\n');
+                }
+                sb.append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
     /**
      * 每轮重算的紧凑进度快照：分析头信息 + 进度统计 + 逐任务行。
      * 就绪/阻塞不存储、每次现算：非完成任务且依赖全部完成即可执行，否则阻塞。

@@ -6,6 +6,7 @@ import org.example.AgentOutput;
 import org.example.Config;
 import org.example.Console;
 import org.example.FactsStore;
+import org.example.RunArchive;
 import org.example.SearchLog;
 import org.example.Skill;
 import org.example.SkillState;
@@ -35,14 +36,16 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
     private final SearchLog parentSearchLog;
     private final SkillState parentSkills;
     private final SubAgentStore reports;
+    private final RunArchive parentArchive;
 
     public DelegateAgentTool(Config.Data cfg, FactsStore parentFacts,
                              SearchLog parentSearchLog, SkillState parentSkills,
-                             SubAgentStore reports) {
+                             RunArchive parentArchive, SubAgentStore reports) {
         this.cfg = cfg;
         this.parentFacts = parentFacts;
         this.parentSearchLog = parentSearchLog;
         this.parentSkills = parentSkills;
+        this.parentArchive = parentArchive;
         this.reports = reports;
     }
 
@@ -106,9 +109,7 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
 
         String executionId = "child-" + UUID.randomUUID().toString().substring(0, 8);
         String agentId = variant == null ? executionId : executionId + "::" + variant;
-        Path workspace = Config.rootDir(cfg.storage())
-                .resolve("subagents").resolve(executionId).toAbsolutePath().normalize();
-        Files.createDirectories(workspace);
+        Path workspace = parentArchive.newSubAgentWorkspace(executionId);
 
         Skill inheritedSkill = parentSkills.get();
         List<FactsStore.Fact> factSnapshot;
@@ -141,6 +142,8 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         }
         Path reportPath = workspace.resolve("final-report.md");
         Files.writeString(reportPath, result.answer());
+        RunArchive childArchive = RunArchive.forWorkspace(workspace, agentId);
+        childArchive.write("archive-index.md", childArchive.markdownIndex());
         reports.add(agentId, variant, reportPath, factMerge.conflicts());
         AgentOutput.println(Console.tool("[delegate_agent] 子Agent " + agentId + " 完成：事实新增 "
                 + factMerge.added() + " / 冲突 " + factMerge.conflicts().size()

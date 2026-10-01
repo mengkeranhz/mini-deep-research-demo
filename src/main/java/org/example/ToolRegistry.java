@@ -56,12 +56,13 @@ public class ToolRegistry {
     private final Map<String, AgentTool> tools = new LinkedHashMap<>();
 
     public ToolRegistry(Config.Data cfg, TaskStore tasks, FactsStore facts, SkillState skills,
-                        SearchLog searchLog, SubAgentStore subAgentReports, Set<String> allowedTools) {
+                        SearchLog searchLog, RunArchive archive, SubAgentStore subAgentReports,
+                        Set<String> allowedTools) {
         AmapClient amap = new AmapClient(cfg.lbs().amapApiKey(), cfg.lbs().minRequestIntervalMs());
         scanPackage(TOOL_PACKAGE).stream()
                 .filter(ToolRegistry::isToolClass)
                 .sorted(Comparator.comparing(Class::getSimpleName)) // 按类名稳定排序
-                .map(c -> instantiate(c, cfg, amap, tasks, facts, skills, searchLog, subAgentReports))
+                .map(c -> instantiate(c, cfg, amap, tasks, facts, skills, searchLog, archive, subAgentReports))
                 .filter(tool -> allowedTools.contains(tool.name()))
                 .forEach(this::register);
     }
@@ -137,7 +138,7 @@ public class ToolRegistry {
     /** 实例化工具：按构造参数类型注入已知依赖（AmapClient / TaskStore / FactsStore / SkillState / SearchLog / Config 各段），无参构造直接实例化。 */
     private static AgentTool instantiate(Class<?> clazz, Config.Data cfg, AmapClient amap, TaskStore tasks,
                                          FactsStore facts, SkillState skills, SearchLog searchLog,
-                                         SubAgentStore subAgentReports) {
+                                         RunArchive archive, SubAgentStore subAgentReports) {
         for (Constructor<?> ctor : clazz.getDeclaredConstructors()) {
             Class<?>[] types = ctor.getParameterTypes();
             Object[] args = new Object[types.length];
@@ -148,6 +149,7 @@ public class ToolRegistry {
                 else if (types[i] == FactsStore.class) args[i] = facts;
                 else if (types[i] == SkillState.class) args[i] = skills;
                 else if (types[i] == SearchLog.class) args[i] = searchLog;
+                else if (types[i] == RunArchive.class) args[i] = archive;
                 else if (types[i] == SubAgentStore.class) args[i] = subAgentReports;
                 else if (types[i] == Config.Llm.class) args[i] = cfg.llm();
                 else if (types[i] == Config.WebSearch.class) args[i] = cfg.webSearch();

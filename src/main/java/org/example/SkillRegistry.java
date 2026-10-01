@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.PathMatcher;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -24,6 +25,8 @@ public final class SkillRegistry {
 
     /** 技能根目录名（根目录 = Config.rootDir，与 read_file 的路径解析一致）。 */
     private static final String SKILLS_DIR = "skills";
+    /** 技能内数据结构目录；领域事实与产物契约属于技能，基座只负责加载与引用识别。 */
+    private static final String SCHEMAS_DIR = "schemas";
 
     private static final List<Skill> SKILLS = scan();
 
@@ -103,8 +106,10 @@ public final class SkillRegistry {
             throw new IllegalStateException(md + " 的 frontmatter 缺少 name");
         }
         String description = fm.get("description") == null ? "" : String.valueOf(fm.get("description")).strip();
-        return new Skill(name, description, front[1].strip(),
-                SKILLS_DIR + "/" + dir.getFileName(), bundledFiles(dir));
+        List<SkillSchema> schemas = schemas(dir);
+        String instructions = SkillSchema.appendTo(front[1].strip(), schemas);
+        return new Skill(name, description, instructions,
+                SKILLS_DIR + "/" + dir.getFileName(), bundledFiles(dir), schemas);
     }
 
     /** 拆分 frontmatter 与正文：[0]=frontmatter 文本，[1]=正文。 */
@@ -135,6 +140,24 @@ public final class SkillRegistry {
             return files;
         } catch (IOException e) {
             throw new IllegalStateException("遍历技能目录 " + dir + " 失败: " + e.getMessage(), e);
+        }
+    }
+
+    /** 加载技能数据结构；JSON 在启动期解析，坏 Schema 直接失败而不是静默退化成普通附件。 */
+    private static List<SkillSchema> schemas(Path dir) {
+        Path folder = dir.resolve(SCHEMAS_DIR);
+        if (!Files.isDirectory(folder)) {
+            return List.of();
+        }
+        PathMatcher json = dir.getFileSystem().getPathMatcher("glob:**.json");
+        try (Stream<Path> files = Files.list(folder)) {
+            return files.filter(Files::isRegularFile)
+                    .filter(json::matches)
+                    .sorted()
+                    .map(SkillSchema::load)
+                    .toList();
+        } catch (IOException e) {
+            throw new IllegalStateException("读取技能断言目录失败: " + folder + ": " + e.getMessage(), e);
         }
     }
 

@@ -1,7 +1,11 @@
 package org.example.tools;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.FactsStore;
+import org.example.Skill;
+import org.example.SkillSchema;
+import org.example.SkillState;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
@@ -18,11 +22,14 @@ import java.util.Set;
 public class RecordFactsTool implements AgentTool {
 
     private static final Set<String> STATUSES = Set.of("found", "proxy", "not_found");
+    private static final ObjectMapper M = new ObjectMapper();
 
     private final FactsStore facts;
+    private final SkillState skills;
 
-    public RecordFactsTool(FactsStore facts) {
+    public RecordFactsTool(FactsStore facts, SkillState skills) {
         this.facts = facts;
+        this.skills = skills;
     }
 
     @Override
@@ -60,7 +67,11 @@ public class RecordFactsTool implements AgentTool {
                                                         "note", Map.of("type", "string",
                                                                 "description", "口径说明/折算方法；not_found 时写已尝试的检索关键词与来源"),
                                                         "critical", Map.of("type", "boolean",
-                                                                "description", "该事实是否为方案成立的关键依赖。非 found 的关键依赖必须在 note 写「保守主方案：」与「升级条件：」")),
+                                                                "description", "该事实是否为方案成立的关键依赖。非 found 的关键依赖必须在 note 写「保守主方案：」与「升级条件：」"),
+                                                        "schema", Map.of("type", "string",
+                                                                "description", "payload 使用的技能数据结构引用：$id 或 $id#/$defs/<定义名>；仅当传 payload 时必填"),
+                                                        "payload", Map.of("type", "object",
+                                                                "description", "结构化领域事实对象。按已加载 Skill 的 JSON Schema 组织；未覆盖字段放入 payload.extensions")),
                                                 "required", List.of("dimension", "period", "status")))),
                         "required", List.of("facts")));
     }
@@ -91,6 +102,33 @@ public class RecordFactsTool implements AgentTool {
                 rejected.add("status 无效（可选 found/proxy/not_found）: " + abbreviate(n));
                 continue;
             }
+            JsonNode payload = n.get("payload");
+            String payloadSchema = ToolRegistry.optStr(n, "schema");
+            String structuredValue = null;
+            if (payload != null && !payload.isNull()) {
+                if (!payload.isObject()) {
+                    rejected.add("[" + dimension + "@" + period + "] payload 必须是 object");
+                    continue;
+                }
+                String schemaError = schemaError(payloadSchema);
+                if (schemaError != null) {
+                    rejected.add("[" + dimension + "@" + period + "] " + schemaError);
+                    continue;
+                }
+                Skill currentSkill = skills.get();
+                List<String> validationErrors = SkillSchema.validate(payloadSchema, payload, currentSkill.schemas());
+                if (!validationErrors.isEmpty()) {
+                    rejected.add("[" + dimension + "@" + period + "] payload 不符合 schema "
+                            + payloadSchema + ": " + String.join("; ", validationErrors));
+                    continue;
+                }
+                try {
+                    structuredValue = M.writeValueAsString(payload);
+                } catch (Exception e) {
+                    rejected.add("[" + dimension + "@" + period + "] payload JSON 序列化失败: " + e.getMessage());
+                    continue;
+                }
+            }
             if ("not_found".equals(status) && (note == null || note.isBlank())) {
                 rejected.add("[" + dimension + "@" + period + "] not_found 必须在 note 写明已尝试的检索关键词与来源");
                 continue;
@@ -105,7 +143,7 @@ public class RecordFactsTool implements AgentTool {
             // 三态计数：无变化=重复入账既有数据，回执点名提示——给模型即时的「勿重复检索」负反馈
             switch (facts.record(new FactsStore.Fact(dimension, period,
                     orEmpty(ToolRegistry.optStr(n, "metric")),
-                    orEmpty(ToolRegistry.optStr(n, "value")),
+                    structuredValue == null ? orEmpty(ToolRegistry.optStr(n, "value")) : structuredValue,
                     orEmpty(ToolRegistry.optStr(n, "source")),
                     status, orEmpty(note), null, critical))) {
                 case NEW -> added++;
@@ -145,6 +183,19 @@ public class RecordFactsTool implements AgentTool {
                     .append("）——若这正是目标数据，请照抄覆盖目标的 dimension 字符串重新入账（同 key 覆盖旧值），否则终答覆盖闸门将报缺口");
         }
         return sb.append('\n').append(facts.coverageLine()).toString();
+    }
+
+    /** payload 必须声明当前 Skill 已加载的数据契约；基座不解释 Schema 内容。 */
+    private String schemaError(String schema) {
+        if (schema == null || schema.isBlank()) {
+            return "传 payload 时必须同时传 schema（$id 或 $id#/$defs/<定义名>）";
+        }
+        Skill skill = skills.get();
+        if (skill == null) {
+            return "尚未加载 Skill，不能使用 payload";
+        }
+        boolean supported = skill.schemas().stream().anyMatch(s -> s.supports(schema));
+        return supported ? null : "schema 引用未在当前 Skill 的 schemas/*.json 中声明: " + schema;
     }
 
     /** 状态归一：空白默认 found（大多数入账是刚检索到的可用数据）。 */

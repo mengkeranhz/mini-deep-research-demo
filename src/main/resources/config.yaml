@@ -19,6 +19,9 @@ storage:
   # 文件保存/读取的根目录。留空时自动回退：工作目录(user.dir) → 项目目录。
   # 也可显式指定绝对路径，或相对工作目录的路径（如 "./data"）。
   root-dir: ""
+  # 父/子 Agent 的 Markdown 审计归档根目录。留空使用 root-dir/runs；
+  # 也可指定绝对路径或相对 root-dir 的路径（如 "./agent-archive"）。
+  audit-dir: ""
 
 tools:
   web-search:

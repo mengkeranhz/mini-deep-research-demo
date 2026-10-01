@@ -16,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.LinkedHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Agent loop（对应方案 7 步）：
@@ -72,8 +73,11 @@ public class Agent {
     private final SearchLog searchLog;
     private final SkillState skillState;
     private final SubAgentStore subAgentReports;
+    private final RunArchive archive;
     /** 终答最近一次被拒的缺陷清单：非空时随上下文压缩重建以最高优先级注入（防重建后靠猜补缺陷）。 */
     private String pendingFinalDefects;
+    /** 当前运行的对话状态引用：仅用于磁盘归档，不参与模型上下文。 */
+    private RunState activeState;
     /** 运行中的用户回复通道：任务未完成时模型向用户提问，从这里读回答。 */
     private final Scanner console;
 
@@ -106,9 +110,12 @@ public class Agent {
         this.searchLog = new SearchLog(agentId);
         this.skillState = new SkillState(); // 会话级生效技能：load_skill 写入，规划注入与压缩重建读取
         this.subAgentReports = new SubAgentStore();
+        this.archive = rootAgent
+                ? RunArchive.createRoot(cfg.storage(), agentId)
+                : RunArchive.forWorkspace(Config.rootDir(cfg.storage()), agentId);
 
         // 工具按父/子白名单注册：父可 delegate_agent，子不可递归委派。
-        this.registry = new ToolRegistry(cfg, tasks, facts, skillState, searchLog,
+        this.registry = new ToolRegistry(cfg, tasks, facts, skillState, searchLog, archive,
                 subAgentReports, rootAgent ? ToolRegistry.ROOT_TOOL_NAMES : ToolRegistry.SUB_AGENT_TOOL_NAMES);
         this.console = rootAgent ? new Scanner(System.in, StandardCharsets.UTF_8) : null;
     }
@@ -124,7 +131,8 @@ public class Agent {
         // 子 Agent 的 storage root 指向独立目录，fetch/read/report 都落在自己的 workspace。
         Config.Data childCfg = new Config.Data(
                 parentCfg.llm(), parentCfg.webSearch(), parentCfg.lbs(),
-                new Config.Storage(workspace.toAbsolutePath().normalize().toString()),
+                new Config.Storage(workspace.toAbsolutePath().normalize().toString(),
+                        parentCfg.storage().auditDir()),
                 parentCfg.readFile(), parentCfg.renderCard());
 
         Agent child = new Agent(childCfg, agentId, false, maxRounds);
@@ -146,23 +154,32 @@ public class Agent {
      * 超轮次上限抛错。各阶段的设计取舍与细节见对应私有方法的注释。
      */
     public String run(String request) {
-        // 父 Agent 保持控制台输出；子 Agent 先绑定 MD 输出，再进入同一个 runLoop。
-        if (rootAgent) {
-            return runLoop(request);
-        }
+        archive.write("request.md", "# 原始述求\n\n" + request + '\n');
+        archive.write("system-prompt.md", "# 系统提示词\n\n" + systemPrompt + '\n');
+        writeRunSummary("running", null, null);
 
-        Path logFile = Config.rootDir(cfg.storage()).resolve("agent.log.md");
+        // 父 Agent 同时写控制台与归档日志；子 Agent 只写自身 Markdown 日志。
+        Path logFile = archive.file("agent.log.md");
         // append 而不是 overwrite：同一个子 Agent 目录中多次运行可保留历史轨迹。
-        try (PrintStream out = new PrintStream(Files.newOutputStream(logFile,
+        try (PrintStream fileOut = new PrintStream(Files.newOutputStream(logFile,
                 java.nio.file.StandardOpenOption.CREATE,
                 java.nio.file.StandardOpenOption.APPEND), true, StandardCharsets.UTF_8)) {
-            AgentOutput.bind(out);
-            Console.plain(true);
-            out.println("\n\n# 子Agent日志 " + agentId + " · " + LocalDateTime.now() + "\n");
+            PrintStream routed = rootAgent ? new TeePrintStream(System.out, fileOut) : fileOut;
+            AgentOutput.bind(routed);
+            Console.plain(!rootAgent);
+            routed.println("\n\n# " + (rootAgent ? "父Agent日志 " : "子Agent日志 ")
+                    + agentId + " · 归档 " + archive.dir() + " · " + LocalDateTime.now() + "\n");
             try {
-                return runLoop(request);
+                String result = runLoop(request);
+                archive.write("final-result.md", "# 最终结果\n\n" + result + '\n');
+                writeCoreState(activeState, "complete", null);
+                writeRunSummary("complete", result, null);
+                routed.println("\n" + Console.header("[归档完成] " + archive.dir()));
+                return result;
             } catch (Exception e) {
-                out.println(Console.error("[子Agent异常] " + e.getMessage()));
+                routed.println(Console.error("[" + (rootAgent ? "父Agent异常" : "子Agent异常") + "] " + e.getMessage()));
+                writeCoreState(activeState, "failed", e.getMessage());
+                writeRunSummary("failed", null, e.getMessage());
                 throw e;
             }
         } catch (Exception e) {
@@ -173,10 +190,95 @@ public class Agent {
         }
     }
 
+    /** 写入核心状态账本；running 阶段写轻量状态，complete/failed 再写完整对话。 */
+    private void writeCoreState(RunState state, String status, String error) {
+        archive.writeIfPresent("task-ledger.md", tasks.ledger());
+        archive.writeIfPresent("fact-ledger.md", facts.ledger());
+        archive.writeIfPresent("search-ledger.md", searchLog.ledger());
+        if (state != null) {
+            archive.write("transcript.md", "# 对话稿（不含工具结果正文）\n\n"
+                    + state.transcript + '\n');
+            if (state.bestAnswer != null && !state.bestAnswer.isBlank()) {
+                archive.write("best-answer-draft.md", "# 最完整答案草稿\n\n" + state.bestAnswer + '\n');
+            }
+            if ("complete".equals(status) || "failed".equals(status)) {
+                archive.write("conversation.md", renderConversation(state.messages));
+            }
+        }
+        Skill skill = skillState.get();
+        if (skill != null) {
+            archive.write("skill.md", "# 已加载技能: " + skill.name() + "\n\n"
+                    + "- 描述: " + skill.description() + "\n"
+                    + "- 目录: " + skill.dir() + "\n\n" + skill.instructions() + '\n');
+        }
+        if (rootAgent) {
+            archive.writeIfPresent("subagents.md", subAgentReports.snapshot());
+        }
+        if (error != null && !error.isBlank()) {
+            archive.write("last-error.md", "# 最近错误\n\n" + error + '\n');
+        }
+        archive.write("archive-index.md", archive.markdownIndex());
+    }
+
+    /** 运行摘要：路径、模型、进度、状态与错误；不写 API key。 */
+    private void writeRunSummary(String status, String result, String error) {
+        StringBuilder sb = new StringBuilder("# Run Summary\n\n")
+                .append("- Agent ID: ").append(agentId).append('\n')
+                .append("- Role: ").append(rootAgent ? "parent" : "child").append('\n')
+                .append("- Archive: ").append(archive.dir()).append('\n')
+                .append("- StartedAt: ").append(archive.startedAt()).append('\n')
+                .append("- UpdatedAt: ").append(LocalDateTime.now()).append('\n')
+                .append("- Status: ").append(status).append('\n')
+                .append("- ModelProvider: ").append(cfg.llm().provider()).append('\n')
+                .append("- Model: ").append(cfg.llm().model()).append('\n')
+                .append("- MaxRounds: ").append(maxRounds).append('\n')
+                .append("- TaskProgress: ").append(tasks.progress()).append('\n')
+                .append("- FactLedger: ").append(facts.coverageLine()).append('\n')
+                .append("- SearchEntries: ").append(searchLog.entries().size()).append('\n');
+        if (rootAgent) {
+            sb.append("- SubAgentArchiveRoot: ").append(archive.dir().resolve("subagents")).append('\n');
+        }
+        if (error != null && !error.isBlank()) {
+            sb.append("\n## Error\n\n").append(error).append('\n');
+        }
+        if (result != null && !result.isBlank()) {
+            sb.append("\n## ResultPreview\n\n").append(excerpt(result, 1600)).append('\n');
+        }
+        archive.write("run-summary.md", sb.toString());
+    }
+
+    /** 完整对话归档：含 assistant thinking、tool_use 参数与 tool_result 正文。 */
+    private static String renderConversation(List<Msg> messages) {
+        StringBuilder sb = new StringBuilder("# 完整对话记录\n");
+        for (Msg msg : messages) {
+            sb.append("\n## ").append(msg.role()).append('\n');
+            for (Block block : msg.blocks()) {
+                if (block instanceof Block.Thinking t) {
+                    sb.append("\n### Thinking\n\n").append(t.thinking()).append('\n');
+                } else if (block instanceof Block.Text t) {
+                    sb.append("\n### Text\n\n").append(t.text()).append('\n');
+                } else if (block instanceof Block.ToolUse u) {
+                    sb.append("\n### ToolUse ").append(u.name()).append(" / ").append(u.id()).append('\n')
+                            .append(u.input()).append('\n');
+                } else if (block instanceof Block.ToolResult r) {
+                    sb.append("\n### ToolResult ").append(r.toolUseId())
+                            .append(r.isError() ? "（ERROR）" : "").append('\n')
+                            .append(r.content()).append('\n');
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String excerpt(String text, int max) {
+        return text.length() <= max ? text : text.substring(0, max) + "\n…（已截断，全文见 final-result.md）";
+    }
+
     private String runLoop(String request) {
         // 跨轮可变状态：对话消息、纯文本对话稿（供压缩摘要）、最完整草稿、内容审核恢复计数；
         // 内容审核恢复与压缩重建时整体 reset 重开对话，而非在旧历史上追加
         RunState state = RunState.initial(request, systemPrompt);
+        this.activeState = state;
         for (int round = 1; round <= maxRounds; round++) {
             // 每轮都显式打印边界，日志中能清楚区分父/子和轮次。
             AgentOutput.println("\n" + Console.header("======== " + (rootAgent ? "" : "[子Agent " + agentId + "] ")
@@ -210,6 +312,7 @@ public class Agent {
             // ④ 超阈值压缩：用上轮响应的 inputTokens 判断（零额外调用）；终答被拒的当轮不压缩——
             //    缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、模型只能靠猜补缺陷
             compressIfNeeded(state, request, resp, outcome.finalRejected());
+            writeCoreState(state, "running", null);
         }
         throw new IllegalStateException((rootAgent ? "Agent" : "子Agent " + agentId)
                 + " 超过最大轮次 " + maxRounds + "，任务未完成");
@@ -777,6 +880,43 @@ public class Agent {
             messages = new ArrayList<>(List.of(
                     Msg.system(systemPrompt), Msg.user(userMessage)));
             transcript = new StringBuilder("用户: ").append(userMessage).append('\n');
+        }
+    }
+
+    /** 父 Agent 输出路由：控制台保留 ANSI，磁盘日志去 ANSI 后同步写入。 */
+    private static final class TeePrintStream extends PrintStream {
+        private static final Pattern ANSI = Pattern.compile("\033\\[[0-9;]*m");
+        private final PrintStream console;
+        private final PrintStream file;
+
+        TeePrintStream(PrintStream console, PrintStream file) {
+            super(console, true, StandardCharsets.UTF_8);
+            this.console = console;
+            this.file = file;
+        }
+
+        @Override
+        public void print(String text) {
+            console.print(text);
+            file.print(ANSI.matcher(text).replaceAll(""));
+        }
+
+        @Override
+        public void println(String text) {
+            console.println(text);
+            file.println(ANSI.matcher(text).replaceAll(""));
+        }
+
+        @Override
+        public void println() {
+            console.println();
+            file.println();
+        }
+
+        @Override
+        public void flush() {
+            console.flush();
+            file.flush();
         }
     }
 

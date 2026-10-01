@@ -111,6 +111,14 @@ public class SearchLog {
         return sb.toString();
     }
 
+    /** 完整检索账本，用于磁盘归档。 */
+    public String ledger() {
+        if (entries.isEmpty()) {
+            return null;
+        }
+        return "# 搜索记录账本\n\n共 " + entries.size() + " 条。\n\n" + render();
+    }
+
     private static String format(Entry e) {
         return e.query() + (e.domains().isEmpty() ? "" : "（限定 " + String.join("、", e.domains()) + "）")
                 + " ×命中 " + e.hits() + " ×来源 " + e.origin();

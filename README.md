@@ -86,6 +86,8 @@ llm:
 storage:
   root-dir: ""                   # fetch_url 保存 / read_file 读取的根目录；
                                  # 留空回退：工作目录 → 项目目录
+  audit-dir: ""                  # 父/子 Agent Markdown 审计归档根目录；
+                                 # 留空使用 root-dir/runs
 
 tools:
   web-search:
@@ -116,3 +118,30 @@ src/main/java/org/example/
 ├── OpenAiClient.java    # OpenAI 协议实现
 └── tools/               # 全部内置工具（自动扫描，按父/子白名单注册）
 ```
+
+## 运行归档
+
+每次父 Agent 运行都会在 `storage.audit-dir` 下创建独立目录，默认形如：
+
+```text
+runs/run-20260101-120000/
+├── agent.log.md             # 父 Agent 完整过程日志（同步控制台输出，去 ANSI）
+├── request.md               # 原始述求
+├── system-prompt.md         # 系统提示词
+├── task-ledger.md           # 首次校验基线、当前计划与任务全文/状态/备注
+├── fact-ledger.md           # 覆盖目标与全量事实账本
+├── search-ledger.md         # 全量搜索记录
+├── transcript.md            # 压缩前对话稿（不含工具结果正文）
+├── conversation.md          # 结束/失败时的完整消息、thinking、tool_use 与 tool_result
+├── best-answer-draft.md     # 最完整终答草稿
+├── skill.md                 # 已加载技能
+├── subagents.md             # 子 Agent 报告索引
+├── final-result.md          # 最终结果
+├── run-summary.md           # 运行状态、模型、进度、覆盖度与错误
+├── archive-index.md         # Markdown 文件清单
+└── subagents/
+    └── child-xxxxxxxx/      # 每个子 Agent 独立归档，文件结构同父 Agent
+```
+
+状态文件在每轮工具执行后原子替换；`agent.log.md` 持续追加。若 `storage.audit-dir`
+配置为绝对路径，归档直接写入该路径；相对路径则相对 `storage.root-dir` 解析。
