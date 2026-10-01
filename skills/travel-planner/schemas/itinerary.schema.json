@@ -63,6 +63,9 @@
         "location": {"type": "string"},
         "route": {"$ref": "urn:mini-deep-research:travel-planner:travel-fact:v1#/$defs/route"},
         "duration": {"type": "string", "pattern": "^PT"},
+        "duration_budget": {
+          "$ref": "urn:mini-deep-research:travel-planner:travel-fact:v1#/$defs/duration_budget"
+        },
         "cost": {"type": "object", "additionalProperties": true},
         "physical_intensity": {"type": "string"},
         "preconditions": {"type": "array", "items": {"type": "string"}},

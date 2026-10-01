@@ -127,6 +127,14 @@ record_facts 入账——里程、耗时、价格、时刻与任何断言同等�
   `duration_budget` 记录 `subject / context / normal / compressed / minimum / preconditions / evidence`。
   数值从用户语境、行程强度、住宿形态、现场约束或来源推导；无法核实则 status=proxy 并写推导理由，
   不得把某个固定分钟数当成普适答案。
+- **现实动作预算库**：排定任何每日主线前，必须先读取
+  `skills/travel-planner/reference/duration-budgets.json`，并按其中的 `subject + context` 选择预算。
+  该库是领域默认假设，不是普适硬规则；覆盖优先级为：用户明确约束 > 已核实现场事实 > context 默认预算 >
+  模型推导。若用户或现场事实覆盖默认值，必须记录覆盖理由与新的前置条件。
+- 使用 `compressed` 或 `minimum` 前，必须逐条核对 `preconditions`，并把已满足的动作写入前序行程
+  （如前一晚购买打包早餐、整理行李、结清房费、车停门口）。不满足前置条件时使用 `normal`。
+- 例如：酒店/餐厅堂食早餐默认 `normal=PT30M`、`compressed=PT20M`，同场景排成 12 分钟不合格；
+  若改为 `packed_or_takeaway_simple`，可在满足前一晚采购/打包、无需加热排队等条件下按 `PT10M–PT15M` 排。
 - “接缝并入”只适用于无操作成本的余量。凡有实际操作成本的动作，必须先有对应 `duration_budget`；
   拆分耦合行时重新核对该预算并重排后续时间轴，不得机械切分原总时长。
 - 服务区休整不是隐形成本：每次 10–15
@@ -195,6 +203,10 @@ record_facts 入账——里程、耗时、价格、时刻与任何断言同等�
   `travel-fact.schema.json` 入账；`itinerary.schema.json` 产物与 Markdown 时刻表的日期、事件顺序、
   交通方式和时长必须一致。发现支撑动作低于其入账预算、缺少前置条件或时间轴被挤压时，重排行程或补足依据，
   不得只改 Markdown 数字。
+- **现实动作预算闸门**：逐个核对 meal / lodging / fueling / ticketing / preparation / rest 等事件。
+  每个有现实操作成本的事件应声明或可追溯到 `duration_budget`；`event.duration` 低于所选 context 的
+  `normal` 时，必须满足 `compressed/minimum` 的全部前置条件。否则选择其一修复：延长动作、改变执行 context、
+  提前完成前置准备、更早出发、更换住宿/餐厅、削减景点或重排当天。不得通过改名或拆行规避预算。
 - **交通方式一票否决闸门**：逐行复核取车后到还车前的跨节点交通行。用户要求自驾时，
   出现停车后换乘国内航班/火车/长途客车、租车闲置形成飞地，均判不合格；披露成本或提供备选不能使该主方案合格。
 - 多版本终检：逐版本执行本节自检后，再按「多版本规划纪律」核验版本契约、路线结构假设、版本专属检索、

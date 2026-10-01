@@ -1,0 +1,125 @@
+{
+  "$schema": "urn:mini-deep-research:travel-planner:duration-budget-library:v1",
+  "$id": "urn:mini-deep-research:travel-planner:duration-budgets:default:v1",
+  "library_version": 1,
+  "description": "Context-sensitive realistic-duration defaults for travel planning. These are skill-level planning defaults, not universal hard rules.",
+  "priority": [
+    "user_constraint",
+    "verified_field_fact",
+    "contextual_default",
+    "general_default"
+  ],
+  "records": [
+    {
+      "subject": "meal.breakfast",
+      "context": "hotel_or_restaurant_table",
+      "normal": "PT30M",
+      "compressed": "PT20M",
+      "minimum": "PT20M",
+      "preconditions": [
+        "已落座或已确定早餐位置",
+        "自助餐/已下单餐食可直接取用",
+        "无需排队等位或现场点单"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "酒店/餐厅堂食早餐包含取餐、进食与收尾；高强度版本可压缩到20分钟，但不能把同一场景写成12分钟。"
+    },
+    {
+      "subject": "meal.breakfast",
+      "context": "packed_or_takeaway_simple",
+      "normal": "PT15M",
+      "compressed": "PT10M",
+      "minimum": "PT10M",
+      "preconditions": [
+        "前一晚已购买或打包",
+        "无需加热、无需排队",
+        "可在出发前或装车后立即食用"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "面包、牛奶、能量棒等简餐可压缩到10-15分钟；使用10分钟下限时必须提前完成采购/打包。"
+    },
+    {
+      "subject": "lodging.checkout_load_vehicle",
+      "context": "standard_checkout",
+      "normal": "PT20M",
+      "compressed": "PT10M",
+      "minimum": "PT10M",
+      "preconditions": [
+        "前一晚已整理行李",
+        "房费已结清或支持快速退房",
+        "车辆停在门口或近停车场"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "标准退房装车含查房/结账/搬行李/检查房间；满足全部快速条件后才可按10分钟估算。"
+    },
+    {
+      "subject": "lodging.checkin",
+      "context": "hotel_front_desk",
+      "normal": "PT20M",
+      "compressed": "PT10M",
+      "minimum": "PT10M",
+      "preconditions": [
+        "已预订且可自助办理",
+        "无需等待前台或升级房型",
+        "仅放行李，不含完整入住手续"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "完整入住含手续、押金、房态说明与行李搬运；连住日仅放行李可更短。"
+    },
+    {
+      "subject": "transport.fueling",
+      "context": "gas_station",
+      "normal": "PT15M",
+      "compressed": "PT10M",
+      "minimum": "PT10M",
+      "preconditions": [
+        "加油站无需排队",
+        "支付方式可直接使用",
+        "仅加油，不同时安排购物或用餐"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "含进站、加油、付款、驶离。高原/偏远/夜间/排队场景应增加余量。"
+    },
+    {
+      "subject": "transport.rental_pickup_or_return",
+      "context": "airport_counter",
+      "normal": "PT30M",
+      "compressed": "PT15M",
+      "minimum": "PT15M",
+      "preconditions": [
+        "订单与证件已准备",
+        "取还车无需排队",
+        "验车拍照/油量/押金流程可线上或快速完成"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "租车取还含手续、验车、拍照、油量与押金；机场高峰应显著增加余量。"
+    },
+    {
+      "subject": "meal.full_meal",
+      "context": "sit_down_service",
+      "normal": "PT45M",
+      "compressed": "PT25M",
+      "minimum": "PT25M",
+      "preconditions": [
+        "已选餐厅且无需等位",
+        "可快速点餐或套餐已确定",
+        "用餐后无需长时间社交/等待结账"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "正餐含点单、上菜、进食、结账；高强度版本可按25分钟下限排，但不能把正餐压成10分钟。"
+    },
+    {
+      "subject": "rest.restroom_or_short_break",
+      "context": "service_area",
+      "normal": "PT15M",
+      "compressed": "PT10M",
+      "minimum": "PT10M",
+      "preconditions": [
+        "卫生间/服务区无需排队",
+        "只上厕所/短暂活动，不同时用餐"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "服务区休整含停车、如厕、返回车辆；与用餐合并时必须按合并后的动作重新核算。"
+    }
+  ]
+}

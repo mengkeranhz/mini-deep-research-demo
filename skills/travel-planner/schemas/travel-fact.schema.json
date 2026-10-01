@@ -123,6 +123,14 @@
         "minimum": {"type": "string", "pattern": "^PT"},
         "maximum": {"type": "string", "pattern": "^PT"},
         "preconditions": {"type": "array", "items": {"type": "string"}},
+        "basis": {
+          "type": "string",
+          "description": "预算来源：user_constraint / verified_field_fact / contextual_default / derived"
+        },
+        "adjustment_policy": {
+          "type": "string",
+          "description": "何时可使用 compressed，或如何被用户约束/现场事实覆盖"
+        },
         "reasoning": {"type": "string"},
         "evidence": {"$ref": "#/$defs/evidence"}
       }

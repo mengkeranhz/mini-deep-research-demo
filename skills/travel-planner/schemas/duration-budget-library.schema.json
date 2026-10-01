@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mini-deep-research:travel-planner:duration-budget-library:v1",
+  "title": "Travel planner duration budget library",
+  "description": "A context-sensitive library of realistic action-duration budgets. Values are planning defaults and may be overridden by user constraints or verified field facts.",
+  "type": "object",
+  "required": ["library_version", "records"],
+  "additionalProperties": true,
+  "properties": {
+    "library_version": {"const": 1},
+    "description": {"type": "string"},
+    "priority": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["subject", "context", "normal", "compressed", "minimum", "preconditions", "basis"],
+        "additionalProperties": true,
+        "properties": {
+          "subject": {"type": "string"},
+          "context": {"type": "string"},
+          "normal": {"type": "string", "pattern": "^PT"},
+          "compressed": {"type": "string", "pattern": "^PT"},
+          "minimum": {"type": "string", "pattern": "^PT"},
+          "preconditions": {"type": "array", "items": {"type": "string"}},
+          "basis": {"type": "string"},
+          "reasoning": {"type": "string"},
+          "extensions": {"type": "object", "additionalProperties": true}
+        }
+      }
+    }
+  }
+}
