@@ -266,7 +266,7 @@ public class FactsStore {
             if (!f.metric().isBlank()) {
                 sb.append(" | ").append(f.metric());
             }
-            sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
+            sb.append(" = ").append(formattedValue(f.value()))
                     .append(" | ").append(f.status())
                     .append(" | 入账Agent: ").append(f.origin());
             if (f.critical()) {
@@ -281,6 +281,17 @@ public class FactsStore {
             sb.append('\n');
         }
         return sb.toString();
+    }
+
+    /** 磁盘账本中把结构化 payload 显示为 JSON 代码块，普通值保持单行展示。 */
+    private static String formattedValue(String value) {
+        if (value == null || value.isBlank()) {
+            return "（未获得）";
+        }
+        String v = value.strip();
+        return v.startsWith("{") && v.endsWith("}")
+                ? "\n\n```json\n" + v + "\n```\n"
+                : v;
     }
 
     /** 给子任务契约使用的父账本机器生成切片；替代父模型手写事实 context。 */

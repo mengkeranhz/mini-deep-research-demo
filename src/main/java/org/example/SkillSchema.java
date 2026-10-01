@@ -61,7 +61,8 @@ public record SkillSchema(String id, String content) {
                 if (schema.supports(ref)) {
                     selected = schema;
                     if (ref.startsWith(schema.id + "#")) {
-                        fragment = ref.substring((schema.id + "#").length());
+                        // 保留完整的 “#/$defs/xxx” 片段；错误地剥掉 '#' 会回落到根 Schema。
+                        fragment = ref.substring(schema.id.length());
                     }
                     break;
                 }
