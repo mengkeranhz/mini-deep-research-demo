@@ -109,6 +109,61 @@
       "reasoning": "正餐含点单、上菜、进食、结账；高强度版本可按25分钟下限排，但不能把正餐压成10分钟。"
     },
     {
+      "subject": "day.named_experience",
+      "context": "intermediate_day",
+      "variant_scope": "all",
+      "normal": "PT2H",
+      "compressed": "PT30M",
+      "minimum": "PT15M",
+      "preconditions": [
+        "体验点已命名且当日确定排入，不是仅写在可选清单中",
+        "已有明确开始/结束时间与到达方式；跨坐标点已有接驳行",
+        "门票、开放、预约或闭馆口径已核对；无法核实时有闭馆/体力备选",
+        "该日角色为中间日，不是到达日、离程日或已声明的休整日"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "任何版本都应区分低强度与无内容。中间日至少保留一个可执行的具名体验点，避免整天只剩交通、餐食和自由缓冲。",
+      "extensions": {
+        "minimum_occurrences_per_applicable_day": 1,
+        "countable_kinds": [
+          "ticketed_attraction",
+          "free_natural_viewpoint",
+          "city_cultural_site",
+          "museum_or_gallery",
+          "local_cultural_walk_with_named_route"
+        ],
+        "non_countable_kinds": [
+          "optional_item_not_scheduled",
+          "unstructured_buffer",
+          "nap_or_rest",
+          "meal_or_snack",
+          "shopping",
+          "night_market_snack",
+          "scenic_drive_without_named_stop",
+          "walking_to_restaurant"
+        ],
+        "applicable_day_roles": ["intermediate"],
+        "exempt_day_roles": ["arrival", "departure", "declared_rest"]
+      }
+    },
+    {
+      "subject": "day.unstructured_buffer",
+      "context": "intermediate_day",
+      "variant_scope": "all",
+      "normal": "PT1H30M",
+      "compressed": "PT30M",
+      "minimum": "PT15M",
+      "maximum": "PT2H30M",
+      "preconditions": [
+        "缓冲有明确用途（休整、高原适应、高温避让、行李整理等）",
+        "缓冲不得计入游览时长或充当当日唯一体验",
+        "连续超过 PT2H30M 时，必须将该日显式定位为休整日并说明健康、天气或前后日强度依据",
+        "非休整日超过上限时，应换入低强度具名体验或重排日程"
+      ],
+      "basis": "contextual_default",
+      "reasoning": "行程可以有恢复窗，但连续被动缓冲过长会造成空转。默认控制在90分钟；确需长恢复时应明示理由并提供可执行升级项。"
+    },
+    {
       "subject": "rest.restroom_or_short_break",
       "context": "service_area",
       "normal": "PT15M",

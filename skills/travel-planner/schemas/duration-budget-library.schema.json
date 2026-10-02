@@ -21,12 +21,17 @@
         "type": "object",
         "required": ["subject", "context", "normal", "compressed", "minimum", "preconditions", "basis"],
         "additionalProperties": true,
-        "properties": {
-          "subject": {"type": "string"},
-          "context": {"type": "string"},
+          "properties": {
+            "subject": {"type": "string"},
+            "context": {"type": "string"},
+            "variant_scope": {
+              "type": "string",
+              "description": "all means the record applies to every plan variant; otherwise name the explicit variant."
+            },
           "normal": {"type": "string", "pattern": "^PT"},
           "compressed": {"type": "string", "pattern": "^PT"},
           "minimum": {"type": "string", "pattern": "^PT"},
+          "maximum": {"type": "string", "pattern": "^PT"},
           "preconditions": {"type": "array", "items": {"type": "string"}},
           "basis": {"type": "string"},
           "reasoning": {"type": "string"},
