@@ -200,9 +200,9 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
             request.append("\n\n## 期望输出\n").append(expectedOutput.strip());
         }
         if (skill != null) {
-            request.append("\n\n## 已继承技能「").append(skill.name())
-                    .append("」（子任务规划与执行必须遵循）\n")
-                    .append(skill.instructions());
+            request.append("\n\n## 已匹配技能\n").append(skill.name())
+                    .append("\n技能状态已预加载；请在首轮调用一次 load_skill 获取完整工作流程，")
+                    .append("不要要求父任务或其他工具重复传输技能全文。\n");
         }
 
         request.append("""

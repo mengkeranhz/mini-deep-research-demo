@@ -17,12 +17,12 @@ import java.util.regex.Pattern;
  * 基座只把 JSON Schema 当作可声明的数据契约加载与展示，不理解其中任何领域字段；
  * 领域对象、事实形态和校验语义全部由 Skill 提供。
  */
-public record SkillSchema(String id, String content) {
+public record SkillSchema(String id, String title, String source, JsonNode root) {
 
     private static final ObjectMapper M = new ObjectMapper();
 
     /** 读取并做语法级校验；坏 Schema 在启动期失败，避免领域契约静默丢失。 */
-    public static SkillSchema load(Path file) {
+    public static SkillSchema load(Path file, String source) {
         try {
             JsonNode root = M.readTree(Files.readString(file, StandardCharsets.UTF_8));
             if (!root.isObject()) {
@@ -32,7 +32,8 @@ public record SkillSchema(String id, String content) {
             if (id == null || id.isBlank()) {
                 throw new IllegalArgumentException("技能数据结构缺少 $id");
             }
-            return new SkillSchema(id.strip(), root.toString());
+            String title = root.path("title").asText("").strip();
+            return new SkillSchema(id.strip(), title, source, root);
         } catch (IOException e) {
             throw new IllegalStateException("读取技能数据结构失败: " + file + ": " + e.getMessage(), e);
         }
@@ -72,10 +73,9 @@ public record SkillSchema(String id, String content) {
             return List.of("未找到 schema 引用: " + reference);
         }
         try {
-            JsonNode root = M.readTree(selected.content);
-            JsonNode node = resolve(root, fragment);
+            JsonNode node = resolve(selected.root(), fragment);
             List<String> errors = new ArrayList<>();
-            validateNode(payload, node, root, schemas, "$", errors);
+            validateNode(payload, node, selected.root(), schemas, "$", errors);
             return errors;
         } catch (Exception e) {
             return List.of("schema 校验失败: " + e.getMessage());
@@ -116,8 +116,7 @@ public record SkillSchema(String id, String content) {
                         .ifPresentOrElse(
                                 s -> {
                                     try {
-                                        JsonNode externalRoot = M.readTree(s.content);
-                                        validateNode(value, resolve(externalRoot, fragment), externalRoot,
+                                        validateNode(value, resolve(s.root(), fragment), s.root(),
                                                 schemas, path, errors);
                                     } catch (Exception e) {
                                         errors.add(path + ": $ref 解析失败 " + reference);
@@ -250,15 +249,18 @@ public record SkillSchema(String id, String content) {
         }
         StringBuilder sb = new StringBuilder(instructions).append("""
 
-                ## 技能数据结构（自动加载）
-                以下 JSON Schema 定义本技能的领域对象、结构化事实与产物形态。基座不理解这些字段；
+                ## 技能数据结构清单（按需读取）
+                以下 JSON Schema 定义本技能的领域对象、结构化事实与产物形态。为控制上下文体积，
+                这里只注入清单；需要精确定义时用 read_file 读取对应文件。
                 使用 `record_facts.payload` 入账领域事实时，必须在 `schema` 中声明对应 `$id` 或
-                `$id#/$defs/<定义名>`，并尽量按 Schema 组织数据。Schema 未覆盖的新字段放入 `extensions`，
-                不要为了适配 Schema 删除关键信息。
+                `$id#/$defs/<定义名>`。Schema 未覆盖的新字段放入 `extensions`，不要删除关键信息。
                 """);
         for (SkillSchema schema : schemas) {
-            sb.append("\n### ").append(schema.id()).append("\n```json\n")
-                    .append(schema.content()).append("\n```\n");
+            sb.append("\n- ").append(schema.id());
+            if (!schema.title().isBlank()) {
+                sb.append("：").append(schema.title());
+            }
+            sb.append("；path=").append(schema.source()).append('\n');
         }
         return sb.toString();
     }

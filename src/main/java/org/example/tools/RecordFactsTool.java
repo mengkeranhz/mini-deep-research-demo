@@ -58,7 +58,7 @@ public class RecordFactsTool implements AgentTool {
                                                         "metric", Map.of("type", "string",
                                                                 "description", "统计口径，如 规模以上工业；单一口径可留空"),
                                                         "value", Map.of("type", "string",
-                                                                "description", "数值含单位，如 34606亿元、+5.1%；not_found 留空"),
+                                                                "description", "短摘要，如 34606亿元、+5.1%。传 payload 时建议省略或不超过80字符，不要重复 payload 全文；not_found 留空"),
                                                         "source", Map.of("type", "string",
                                                                 "description", "来源链接或来源名；not_found 可留空"),
                                                         "status", Map.of("type", "string",
@@ -71,7 +71,7 @@ public class RecordFactsTool implements AgentTool {
                                                         "schema", Map.of("type", "string",
                                                                 "description", "payload 使用的技能数据结构引用：$id 或 $id#/$defs/<定义名>；仅当传 payload 时必填"),
                                                         "payload", Map.of("type", "object",
-                                                                "description", "结构化领域事实对象。按已加载 Skill 的 JSON Schema 组织；未覆盖字段放入 payload.extensions")),
+                                                                "description", "结构化领域事实对象。按已加载 Skill 的 JSON Schema 组织；未覆盖字段放入 payload.extensions；不要与 value/note 大段重复")),
                                                 "required", List.of("dimension", "period", "status")))),
                         "required", List.of("facts")));
     }
@@ -108,6 +108,11 @@ public class RecordFactsTool implements AgentTool {
             if (payload != null && !payload.isNull()) {
                 if (!payload.isObject()) {
                     rejected.add("[" + dimension + "@" + period + "] payload 必须是 object");
+                    continue;
+                }
+                String plainValue = ToolRegistry.optStr(n, "value");
+                if (plainValue != null && plainValue.strip().length() > 240) {
+                    rejected.add("[" + dimension + "@" + period + "] 同时传 payload 时 value 只能是短摘要（≤240字符），不要重复结构化正文");
                     continue;
                 }
                 String schemaError = schemaError(payloadSchema);

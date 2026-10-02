@@ -47,4 +47,14 @@ public final class AgentOutput {
             out.println();
         }
     }
+
+    /** 每轮/异常收尾时统一 flush；避免 PrintStream autoflush 在每个流式片段上同步刷盘。 */
+    public static void flush() {
+        PrintStream out = BOUND.get();
+        if (out == null) {
+            System.out.flush();
+        } else {
+            out.flush();
+        }
+    }
 }

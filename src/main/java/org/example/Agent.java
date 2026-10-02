@@ -78,6 +78,10 @@ public class Agent {
     private String pendingFinalDefects;
     /** 当前运行的对话状态引用：仅用于磁盘归档，不参与模型上下文。 */
     private RunState activeState;
+    /** Skill 全文一次运行内不变，归档只需写一次。 */
+    private boolean skillArchiveWritten;
+    /** 状态账本节流：避免每轮全量重写大文件；完成/失败时仍强制全量归档。 */
+    private int lastStateArchiveRound;
     /** 运行中的用户回复通道：任务未完成时模型向用户提问，从这里读回答。 */
     private final Scanner console;
 
@@ -163,7 +167,7 @@ public class Agent {
         // append 而不是 overwrite：同一个子 Agent 目录中多次运行可保留历史轨迹。
         try (PrintStream fileOut = new PrintStream(Files.newOutputStream(logFile,
                 java.nio.file.StandardOpenOption.CREATE,
-                java.nio.file.StandardOpenOption.APPEND), true, StandardCharsets.UTF_8)) {
+                java.nio.file.StandardOpenOption.APPEND), false, StandardCharsets.UTF_8)) {
             PrintStream routed = rootAgent ? new TeePrintStream(System.out, fileOut) : fileOut;
             AgentOutput.bind(routed);
             Console.plain(!rootAgent);
@@ -185,6 +189,7 @@ public class Agent {
         } catch (Exception e) {
             throw e instanceof RuntimeException runtime ? runtime : new RuntimeException(e);
         } finally {
+            AgentOutput.flush();
             Console.plain(false);
             AgentOutput.unbind();
         }
@@ -192,6 +197,7 @@ public class Agent {
 
     /** 写入核心状态账本；running 阶段写轻量状态，complete/failed 再写完整对话。 */
     private void writeCoreState(RunState state, String status, String error) {
+        boolean finalArchive = "complete".equals(status) || "failed".equals(status);
         archive.writeIfPresent("task-ledger.md", tasks.ledger());
         archive.writeIfPresent("fact-ledger.md", facts.ledger());
         archive.writeIfPresent("search-ledger.md", searchLog.ledger());
@@ -201,15 +207,16 @@ public class Agent {
             if (state.bestAnswer != null && !state.bestAnswer.isBlank()) {
                 archive.write("best-answer-draft.md", "# 最完整答案草稿\n\n" + state.bestAnswer + '\n');
             }
-            if ("complete".equals(status) || "failed".equals(status)) {
+            if (finalArchive) {
                 archive.write("conversation.md", renderConversation(state.messages));
             }
         }
         Skill skill = skillState.get();
-        if (skill != null) {
+        if (skill != null && (finalArchive || !skillArchiveWritten)) {
             archive.write("skill.md", "# 已加载技能: " + skill.name() + "\n\n"
                     + "- 描述: " + skill.description() + "\n"
                     + "- 目录: " + skill.dir() + "\n\n" + skill.instructions() + '\n');
+            skillArchiveWritten = true;
         }
         if (rootAgent) {
             archive.writeIfPresent("subagents.md", subAgentReports.snapshot());
@@ -217,7 +224,9 @@ public class Agent {
         if (error != null && !error.isBlank()) {
             archive.write("last-error.md", "# 最近错误\n\n" + error + '\n');
         }
-        archive.write("archive-index.md", archive.markdownIndex());
+        if (finalArchive) {
+            archive.write("archive-index.md", archive.markdownIndex());
+        }
     }
 
     /** 运行摘要：路径、模型、进度、状态与错误；不写 API key。 */
@@ -289,6 +298,7 @@ public class Agent {
             //    返回 null = 输入触发网关内容审核：历史已丢弃并按账本重建，本轮到此为止
             LlmResponse resp = callLlm(state, request, withTailSnapshots(state.messages));
             if (resp == null) {
+                AgentOutput.flush();
                 continue; // 网关内容审核已恢复：历史已丢弃并按账本重建，进入下一轮
             }
 
@@ -300,6 +310,7 @@ public class Agent {
                 if (conclusion != null) {
                     return conclusion; // 只有“无任何校验依据”或“纯文本已过闸门”才会到这里
                 }
+                AgentOutput.flush();
                 continue; // 空响应催促已注入或用户回复已入对话，进入下一轮
             }
 
@@ -312,7 +323,11 @@ public class Agent {
             // ④ 超阈值压缩：用上轮响应的 inputTokens 判断（零额外调用）；终答被拒的当轮不压缩——
             //    缺陷清单刚以 tool 结果进入对话，立即压缩会把它降级进摘要、模型只能靠猜补缺陷
             compressIfNeeded(state, request, resp, outcome.finalRejected());
-            writeCoreState(state, "running", null);
+            if (round - lastStateArchiveRound >= 5) {
+                lastStateArchiveRound = round;
+                writeCoreState(state, "running", null);
+            }
+            AgentOutput.flush();
         }
         throw new IllegalStateException((rootAgent ? "Agent" : "子Agent " + agentId)
                 + " 超过最大轮次 " + maxRounds + "，任务未完成");
@@ -336,9 +351,9 @@ public class Agent {
      * 以用户消息追加在对话末尾（只放进本次调用的副本，messages 不留旧快照，天然无陈旧堆积、
      * 压缩重建也无需处理）。当前时间同样每轮尾注注入：时效判断（今天/本周/营业中/节假日）从
      * 第一轮起就有依据，无需模型自发调用 current_time——无祈使句槽位的工具在 temperature=0 下
-     * 不会被主动调用，且每次调用耗一整个轮次；时间消息放在尾注最前，倒数第二条仍是任务快照，
-     * cache_control 断点目标不变。位置决定缓存命运：快照每轮变化，此前插在历史头部会把其后全部
-     * 内容变成缓存 miss；放尾部后 system+历史是逐轮只追加的稳定前缀，断点逐轮增量命中。
+     * 不会被主动调用，且每次调用耗一整个轮次。时间/任务/账本/子报告合并为一条动态尾注；
+     * AnthropicClient 在倒数第二条消息打 cache_control 时，断点落在 state.messages 的稳定末尾，
+     * 动态快照不会破坏稳定历史的 KV 前缀缓存。
      * 账本快照带覆盖缺口，逼模型补齐而非提前收工。
      */
     private List<Msg> withTailSnapshots(List<Msg> messages) {
@@ -347,24 +362,25 @@ public class Agent {
         String factsSnapshot = facts.snapshot();
         List<Msg> callMessages = new ArrayList<>(messages);
 
-        // 注入顺序：时间 → 任务 → 账本 → 子报告；都是 user 尾注，模型无需主动调用状态工具。
-        callMessages.add(Msg.user("[当前时间·每轮自动追加的状态块，非用户消息，不要回复它] "
-                + CurrentTimeTool.nowText()));
+        // 注入顺序：时间 → 任务 → 账本 → 子报告，合并为一条动态尾注，保证稳定历史末尾可缓存。
+        StringBuilder tail = new StringBuilder("[当前时间·每轮自动追加的状态块，非用户消息，不要回复它] ")
+                .append(CurrentTimeTool.nowText()).append('\n');
         if (snapshot != null) {
             AgentOutput.println(Console.header("[任务快照已注入·尾注] ") + tasks.progress());
-            callMessages.add(Msg.user(snapshot));
+            tail.append("\n\n").append(snapshot).append('\n');
         }
         if (factsSnapshot != null) {
             AgentOutput.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
-            callMessages.add(Msg.user(factsSnapshot));
+            tail.append("\n\n").append(factsSnapshot).append('\n');
         }
         if (rootAgent) {
             // 子报告只放路径与核对提示；需要正文时再 read_file，避免重建上下文过大。
             String reports = subAgentReports.snapshot();
             if (reports != null) {
-                callMessages.add(Msg.user(reports));
+                tail.append("\n\n").append(reports).append('\n');
             }
         }
+        callMessages.add(Msg.user(tail.toString()));
         return callMessages;
     }
 
@@ -890,7 +906,7 @@ public class Agent {
         private final PrintStream file;
 
         TeePrintStream(PrintStream console, PrintStream file) {
-            super(console, true, StandardCharsets.UTF_8);
+            super(console, false, StandardCharsets.UTF_8);
             this.console = console;
             this.file = file;
         }

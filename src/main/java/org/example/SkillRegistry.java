@@ -154,7 +154,8 @@ public final class SkillRegistry {
             return files.filter(Files::isRegularFile)
                     .filter(json::matches)
                     .sorted()
-                    .map(SkillSchema::load)
+                    .map(file -> SkillSchema.load(file, SKILLS_DIR + "/"
+                            + dir.getFileName() + "/" + dir.relativize(file)))
                     .toList();
         } catch (IOException e) {
             throw new IllegalStateException("读取技能断言目录失败: " + folder + ": " + e.getMessage(), e);

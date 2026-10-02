@@ -227,7 +227,7 @@ public class FactsStore {
                 if (!f.metric().isBlank()) {
                     sb.append(" | ").append(f.metric());
                 }
-                sb.append(" = ").append(f.value().isBlank() ? "（未获得）" : f.value())
+                sb.append(" = ").append(snapshotValue(f.value()))
                         .append(" (").append(f.status()).append("; 来源Agent ")
                         .append(f.origin()).append(")\n");
             }
@@ -281,6 +281,17 @@ public class FactsStore {
             sb.append('\n');
         }
         return sb.toString();
+    }
+
+    /** 每轮模型快照只提示结构化 payload 已存在；完整 JSON 留给磁盘账本和终检，避免重复注入。 */
+    private static String snapshotValue(String value) {
+        if (value == null || value.isBlank()) {
+            return "（未获得）";
+        }
+        String v = value.strip();
+        return v.startsWith("{") && v.endsWith("}")
+                ? "（结构化 payload " + v.length() + " 字符，已入账；详情见全量账本/归档）"
+                : v;
     }
 
     /** 磁盘账本中把结构化 payload 显示为 JSON 代码块，普通值保持单行展示。 */

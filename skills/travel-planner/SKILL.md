@@ -127,8 +127,9 @@ record_facts 入账——里程、耗时、价格、时刻与任何断言同等�
   `duration_budget` 记录 `subject / context / normal / compressed / minimum / preconditions / evidence`。
   数值从用户语境、行程强度、住宿形态、现场约束或来源推导；无法核实则 status=proxy 并写推导理由，
   不得把某个固定分钟数当成普适答案。
-- **现实动作预算库**：排定任何每日主线前，必须先读取
-  `skills/travel-planner/reference/duration-budgets.json`，并按其中的 `subject + context` 选择预算。
+- **现实动作预算库**：本 Agent 运行期间只需读取一次
+  `skills/travel-planner/reference/duration-budgets.json`，并将选用的预算入账；后续排程沿用该账本结果，
+  不得每日或每版本重复读取同一文件。读取后按其中的 `subject + context` 选择预算。
   该库是领域默认假设，不是普适硬规则；覆盖优先级为：用户明确约束 > 已核实现场事实 > context 默认预算 >
   模型推导。若用户或现场事实覆盖默认值，必须记录覆盖理由与新的前置条件。
 - 使用 `compressed` 或 `minimum` 前，必须逐条核对 `preconditions`，并把已满足的动作写入前序行程
