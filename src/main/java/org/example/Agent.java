@@ -373,6 +373,19 @@ public class Agent {
             AgentOutput.println(Console.header("[事实账本已注入·尾注] ") + facts.coverageLine());
             tail.append("\n\n").append(factsSnapshot).append('\n');
         }
+        // 结构化入账负反馈：技能声明了数据契约、本 Agent 已开始入账却全是纯文本时，每轮尾注点名。
+        // 「优先用 payload」类弱指令只在 load_skill 的工具结果里出现一次，入账点不可见；
+        // 此处把「技能有契约而账本零结构化」变成每轮可见的状态信号，直到出现首条 payload 条目为止。
+        Skill currentSkill = skillState.get();
+        if (needsStructuredHint(currentSkill, facts)) {
+            tail.append("\n\n[结构化入账提醒·每轮自动追加的状态块，非用户消息] 已加载技能 ")
+                    .append(currentSkill.name())
+                    .append(" 声明了领域数据结构，但本账本尚无任何 payload+schema 结构化条目——")
+                    .append("属于该技能领域对象的事实（见技能数据结构清单）入账时必须传 payload 与 schema 引用，")
+                    .append("不要只用 value/note 文本。\n");
+            AgentOutput.println(Console.header("[结构化入账提醒·尾注] ") + "账本 "
+                    + facts.facts().size() + " 条均无 payload");
+        }
         if (rootAgent) {
             // 子报告只放路径与核对提示；需要正文时再 read_file，避免重建上下文过大。
             String reports = subAgentReports.snapshot();
@@ -382,6 +395,16 @@ public class Agent {
         }
         callMessages.add(Msg.user(tail.toString()));
         return callMessages;
+    }
+
+    /**
+     * 结构化入账负反馈触发条件：技能声明了数据契约、本 Agent 已用自己的条目开始入账
+     * （排除刚建账还没入账的空账本）、且其中没有任何 payload 条目——即文本路径已被选用。
+     * 首条结构化条目入账后即静默，避免长期噪音。
+     */
+    static boolean needsStructuredHint(Skill skill, FactsStore facts) {
+        return skill != null && !skill.schemas().isEmpty()
+                && facts.hasOwnEntries() && facts.structuredCount() == 0;
     }
 
     /**

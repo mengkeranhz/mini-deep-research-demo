@@ -209,6 +209,21 @@ public class FactsStore {
     }
 
     /**
+     * 本 Agent 已入账条目中结构化条目（record_facts payload 序列化 JSON，value 首字符 '{'）的数量。
+     * 只算自己的账本不含 inheritedFacts——继承的结构化条目是示范样例，不能证明本 Agent 会用 payload。
+     */
+    public long structuredCount() {
+        return facts.values().stream()
+                .filter(f -> f.value() != null && f.value().strip().startsWith("{"))
+                .count();
+    }
+
+    /** 本 Agent 自己入过账（不含继承与覆盖目标声明）——入账行为已发生、文本路径已被选用的判定。 */
+    public boolean hasOwnEntries() {
+        return !facts.isEmpty();
+    }
+
+    /**
      * 每轮注入的瘦身快照：计数 + 覆盖缺口 + 上次快照以来的新增/变更 + 维度索引。
      * 不再逐轮注入全部条目数值——账本越大每轮固定开销越大，且诱导模型每轮重审全账本；
      * 全量账本只在压缩重建（ledger）与终答校验时进入上下文。检索前模型对照维度索引即可
