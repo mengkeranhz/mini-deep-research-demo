@@ -140,8 +140,14 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         synchronized (parentSearchLog) {
             searchMerge = parentSearchLog.merge(result.searches());
         }
+        // final-report.md 是子 Agent 在工作目录中生成的领域交付物（可能包含完整逐日时刻表）。
+        // final_answer 是闸门后的子任务摘要/报告，二者不能混用：这里绝不能用 answer 覆盖领域交付物。
+        Path finalAnswerPath = workspace.resolve("subagent-final-answer.md");
+        Files.writeString(finalAnswerPath, result.answer());
         Path reportPath = workspace.resolve("final-report.md");
-        Files.writeString(reportPath, result.answer());
+        if (!Files.exists(reportPath) || Files.size(reportPath) == 0) {
+            Files.writeString(reportPath, result.answer());
+        }
         RunArchive childArchive = RunArchive.forWorkspace(workspace, agentId);
         childArchive.write("archive-index.md", childArchive.markdownIndex());
         reports.add(agentId, variant, reportPath, factMerge.conflicts());
@@ -228,7 +234,9 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
         StringBuilder sb = new StringBuilder("子 Agent ").append(agentId).append(" 执行完成。\n\n")
                 .append("## 子 Agent 最终报告\n").append(answer).append('\n')
                 .append("\n## 子 Agent 文件目录\n").append(workspace)
-                .append("\n## 最终报告文件\n").append(workspace.resolve("final-report.md")).append('\n')
+                .append("\n## 领域交付物\n").append(workspace.resolve("final-report.md"))
+                .append("\n## final_answer 文件（不得覆盖领域交付物）\n")
+                .append(workspace.resolve("subagent-final-answer.md")).append('\n')
                 .append("\n## 事实合并（按来源 Agent 保留，不互相覆盖）\n")
                 .append("- 新增: ").append(factMerge.added())
                 .append("; 更新: ").append(factMerge.updated())

@@ -183,6 +183,26 @@ public class FactsStore {
     }
 
     /**
+     * 同一 dimension/period 下已存在但与本次 metric 不同的口径，最多 3 个。
+     * record_facts 用它提示“覆盖更新”陷阱：metric 改名会追加新事实而不是覆盖旧事实。
+     */
+    public List<String> otherMetrics(String dimension, String period, String metric) {
+        if (dimension == null || period == null) {
+            return List.of();
+        }
+        String d = canonicalDimension(dimension);
+        String p = period.strip();
+        String m = nz(metric);
+        return allFacts().stream()
+                .filter(f -> d.equals(f.dimension()) && p.equals(f.period()))
+                .map(Fact::metric)
+                .filter(x -> !x.isBlank() && !x.equals(m))
+                .distinct()
+                .limit(3)
+                .toList();
+    }
+
+    /**
      * 入账回执提示用：与 dimension 不精确相等（含首尾空白差异）但归一化后近似
      * （去空白/大小写/分隔符后同名，或单边包含）的已声明目标，最多 2 个——
      * 与 period 错位提示对称：疑似 dimension 标签错位，提示照抄目标字符串重录。

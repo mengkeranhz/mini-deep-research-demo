@@ -34,13 +34,17 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
-        "source_type": {"type": "string"},
+        "source_type": {
+          "type": "string",
+          "enum": ["official", "primary", "secondary", "derived", "user", "tool"],
+          "description": "official/primary require a first-party publisher URL; reposts, OTAs, UGC, guides, and search aggregators are secondary."
+        },
         "name": {"type": "string"},
         "url": {"type": "string"},
         "published_at": {"type": "string"},
         "retrieved_at": {"type": "string"},
         "quote": {"type": "string"},
-        "confidence": {"type": "string", "enum": ["official", "high", "medium", "low"]}
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
       }
     },
     "geo": {

@@ -23,8 +23,14 @@
         "variant": {"type": "string"},
         "origin": {"type": "string"},
         "destination": {"type": "string"},
-        "start_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
-        "end_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+        "start_date": {
+          "description": "Actual date, or null when the trip is date-relative (D1..Dn).",
+          "oneOf": [{"type": "null"}, {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}]
+        },
+        "end_date": {
+          "description": "Actual date, or null when the trip is date-relative (D1..Dn).",
+          "oneOf": [{"type": "null"}, {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}]
+        },
         "transport_mode": {"type": "string"},
         "participants": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "objectives": {"type": "array", "items": {"type": "string"}},
@@ -40,7 +46,10 @@
       "additionalProperties": true,
       "properties": {
         "day_id": {"type": "string"},
-        "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+        "date": {
+          "description": "Actual date, or null when using relative day IDs only.",
+          "oneOf": [{"type": "null"}, {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}]
+        },
         "summary": {"type": "string"},
         "lodging": {"$ref": "#/$defs/lodging"},
         "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
@@ -62,6 +71,11 @@
         "title": {"type": "string"},
         "location": {"type": "string"},
         "route": {"$ref": "urn:mini-deep-research:travel-planner:travel-fact:v1#/$defs/route"},
+        "non_travel_duration_minutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Required when event wall time exceeds route.duration by more than 10 minutes; explicitly accounts for parking, ticketing, walking, waiting, or loading."
+        },
         "duration": {"type": "string", "pattern": "^PT"},
         "duration_budget": {
           "$ref": "urn:mini-deep-research:travel-planner:travel-fact:v1#/$defs/duration_budget"

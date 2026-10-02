@@ -2,6 +2,7 @@ package org.example.tools;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.example.Config;
+import org.example.SkillRegistry;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
@@ -10,6 +11,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -33,26 +35,49 @@ public class RunCodeTool implements AgentTool {
 
     @Override
     public ToolDef definition() {
-        return new ToolDef(name(), "在本地执行一段 Python 3 脚本（60 秒超时），返回合并的 stdout+stderr。"
-                        + "它是万能补位工具：不止计算与数据处理——脚本能访问网络与本地文件，"
-                        + "可现场实现各种实用小工具，达成内置工具边界之外的能力："
-                        + "发起 HTTP 请求（GET/POST、带 header）、下载并解析远程文件（JSON/HTML/XML/CSV）、"
-                        + "读写本地已有文件（工作目录=应用根目录，相对路径由此解析）、"
-                        + "正则批量提取、数据清洗、格式转换等。"
+        Map<String, Object> script = Map.of("type", "string",
+                "description", "Python 3 脚本全文；与 skill_script 二选一");
+        Map<String, Object> skillScript = Map.of("type", "string",
+                "description", "Skill 附件脚本地址 skill://<skill-name>/<relative-path>；与 script 二选一");
+        Map<String, Object> args = Map.of("type", "array", "items", Map.of("type", "string"),
+                "description", "仅 skill_script 模式使用的命令行参数");
+        return new ToolDef(name(), "在本地执行 Python 3（60 秒超时），返回合并的 stdout+stderr。"
+                        + "支持临时 script 或 Skill 自带 skill_script；后者用于执行技能目录 scripts/*.py，"
+                        + "args 作为命令行参数传入。"
                         + "第三方库（requests 等）未预装，一律用标准库（urllib/json/re/csv 等）实现。",
                 Map.of("type", "object",
-                        "properties", Map.of(
-                                "script", Map.of("type", "string", "description", "Python 3 脚本全文")),
-                        "required", List.of("script")));
+                        "properties", Map.of("script", script, "skill_script", skillScript, "args", args),
+                        "required", List.of()));
     }
 
     @Override
     public String execute(JsonNode input) throws Exception {
-        String script = ToolRegistry.str(input, "script");
-        Path file = Files.createTempDirectory("run_code").resolve("script.py");
-        Files.writeString(file, script);
+        String script = ToolRegistry.optStr(input, "script");
+        String skillScript = ToolRegistry.optStr(input, "skill_script");
+        boolean hasScript = script != null && !script.isBlank();
+        boolean hasSkillScript = skillScript != null && !skillScript.isBlank();
+        if (hasScript == hasSkillScript) {
+            throw new IllegalArgumentException("script 与 skill_script 必须二选一");
+        }
 
-        Process p = new ProcessBuilder("python3", file.toString())
+        List<String> command = new ArrayList<>();
+        Path file;
+        if (hasSkillScript) {
+            file = SkillRegistry.skillResource(skillScript);
+            command.add("python3");
+            command.add(file.toString());
+            JsonNode args = input.get("args");
+            if (args != null && !args.isNull()) {
+                command.addAll(ToolRegistry.strList(input, "args"));
+            }
+        } else {
+            file = Files.createTempDirectory("run_code").resolve("script.py");
+            Files.writeString(file, script);
+            command.add("python3");
+            command.add(file.toString());
+        }
+
+        Process p = new ProcessBuilder(command)
                 .directory(root.toFile())
                 .redirectErrorStream(true) // stdout+stderr 合并，避免管道缓冲死锁
                 .start();

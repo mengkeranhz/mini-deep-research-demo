@@ -21,7 +21,10 @@
 - 同一轮的多个 `delegate_agent` 会并发执行（最多 4 个），事实 / 检索 / 报告在各自子任务完成后按互斥锁合并回父 Agent；父 Agent 控制台只输出委派启动与汇总结果
 - 多版本 / 多方案 / 多情景任务按「一个最终交付物实例一个子 Agent」委派，并通过 `variant` 标明版本名；子 Agent 内部再自行 `analyze_query`
 - 子 Agent 继承父 Agent 的检索日志与当前技能，不能向用户提问，也不能递归调用 `delegate_agent`（父子工具均使用显式白名单）；默认 60 轮，必须通过自己的 `final_answer` 闸门
-- 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent，最终报告另存为 `subagents/<agent-id>/final-report.md`，过程日志追加在 `subagents/<agent-id>/agent.log.md`：同 key 证据不互相覆盖；数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
+- 子 Agent 完成后，事实与检索日志按来源 Agent 标记合并回父 Agent，`final_answer` 另存为
+  `subagents/<agent-id>/subagent-final-answer.md`，不会覆盖子 Agent 在工作目录生成的领域交付物
+  `final-report.md`；过程日志追加在 `subagents/<agent-id>/agent.log.md`。同 key 证据不互相覆盖；
+  数值/状态一致记为互证，不一致保留冲突并由父级闸门强制复核
 
 ### 事实账本
 
@@ -35,6 +38,15 @@
 1. **约束校验**：独立校验器对照固化基线与账本逐条核对草稿——数据矛盾、遗漏入账事实、假称「未找到」均拦截
 2. **覆盖度闸门**：覆盖目标还有格子未入账，或 `not_found` 未写明检索方式，不放行——防止「5/5 任务完成」的假象掩盖数据缺口
 3. **技能与关键依赖闸门**：已加载技能的输出骨架与终检要求会进入校验依据；`critical=true` 且非 `found` 的住宿、通行、放票等依赖不得直接支撑主方案，必须给保守主方案与升级条件
+4. **技能产物自检**：技能可在自己的 `scripts/` 目录携带领域校验脚本。例如 `travel-planner`
+   要求终答前读取并执行 `scripts/validate_itinerary.py`，拦截时间轴断裂、交通耗时与事件墙钟矛盾、
+   负数费用、非严格单位/时长格式等问题；修复顺序固定为 JSON → Markdown 渲染 → 事实账本
+
+### 来源证据语义
+
+`travel-fact.schema.json` 将 `evidence.source_type` 区分为 `official / primary / secondary / derived / user / tool`。
+转载、聚合、UGC 与攻略站内容应如实标 `secondary`；official/primary 保留给官方域名或一手发布者，
+避免把二手转载包装成一手权威。
 
 ## 内置工具
 
@@ -50,7 +62,7 @@
 | `fetch_url` | 抓取 URL 保存到本地：HTML 转 Markdown（标题/段落/链接），PDF/二进制原样保存 |
 | `read_file` | 按行读取本地文件，支持关键词命中段落检索 |
 | `record_facts` | 关键数据写入事实账本，回执含覆盖度 |
-| `run_code` | 本地执行 Python 3 脚本（60 秒超时），返回 stdout+stderr |
+| `run_code` | 本地执行 Python 3（60 秒超时），支持临时 `script` 或 Skill 自带 `skill_script`，返回 stdout+stderr |
 | `current_time` | 当前日期时间（含时区参数） |
 | `search_place` / `nearby_search` / `route_query` | 高德 LBS：地点查询 / 周边 POI / 路线（驾车/步行/骑行/公交/出租车） |
 | `final_answer` | 提交最终答案，过闸门后任务结束 |
@@ -141,6 +153,7 @@ runs/run-20260101-120000/
 ├── archive-index.md         # Markdown 文件清单
 └── subagents/
     └── child-xxxxxxxx/      # 每个子 Agent 独立归档，文件结构同父 Agent
+                              # 另含 subagent-final-answer.md（final_answer，不覆盖 final-report.md）
 ```
 
 状态文件在每轮工具执行后原子替换；`agent.log.md` 持续追加。若 `storage.audit-dir`

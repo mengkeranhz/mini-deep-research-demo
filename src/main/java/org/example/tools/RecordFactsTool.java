@@ -24,7 +24,6 @@ public class RecordFactsTool implements AgentTool {
 
     private static final Set<String> STATUSES = Set.of("found", "proxy", "not_found");
     private static final ObjectMapper M = new ObjectMapper();
-
     private final FactsStore facts;
     private final SkillState skills;
 
@@ -72,7 +71,7 @@ public class RecordFactsTool implements AgentTool {
                                                         "schema", Map.of("type", "string",
                                                                 "description", "payload 使用的技能数据结构引用。优先用 $id#/$defs/<定义名> 指向具体对象；根 $id 仅当 payload 本身是完整 envelope；仅当传 payload 时必填"),
                                                         "payload", Map.of("type", "object",
-                                                                "description", "结构化领域事实对象。按已加载 Skill 的 JSON Schema 组织；未覆盖字段放入 payload.extensions；不要与 value/note 大段重复")),
+                                                                "description", "结构化领域事实对象。按已加载 Skill 的 JSON Schema 组织；未覆盖字段放入 payload.extensions；不要与 value/note 大段重复；evidence 来源语义必须符合 Schema")),
                                                 "required", List.of("dimension", "period", "status")))),
                         "required", List.of("facts")));
     }
@@ -86,6 +85,7 @@ public class RecordFactsTool implements AgentTool {
         List<String> rejected = new ArrayList<>();
         List<String> offTarget = new ArrayList<>();
         List<String> offDimension = new ArrayList<>();
+        List<String> appendWarnings = new ArrayList<>();
         int added = 0;
         int updated = 0;
         int unchanged = 0;
@@ -154,14 +154,20 @@ public class RecordFactsTool implements AgentTool {
                 continue;
             }
             // 三态计数：无变化=重复入账既有数据，回执点名提示——给模型即时的「勿重复检索」负反馈
+            String metric = orEmpty(ToolRegistry.optStr(n, "metric"));
             switch (facts.record(new FactsStore.Fact(dimension, period,
-                    orEmpty(ToolRegistry.optStr(n, "metric")),
+                    metric,
                     structuredValue == null ? orEmpty(ToolRegistry.optStr(n, "value")) : structuredValue,
                     orEmpty(ToolRegistry.optStr(n, "source")),
                     status, orEmpty(note), null, critical))) {
                 case NEW -> added++;
                 case UPDATED -> updated++;
                 case UNCHANGED -> unchanged++;
+            }
+            List<String> related = facts.otherMetrics(dimension, period, metric);
+            if (!related.isEmpty()) {
+                appendWarnings.add(dimension + "@" + period + " 本次 metric=" + metric
+                        + "；已有不同 metric=" + String.join("、", related));
             }
             // 两类标签错位提示互斥：dimension 精确命中才校验 period；未命中则查近似目标（对称提示）
             if (!facts.hitsTarget(dimension, period)) {
@@ -194,6 +200,13 @@ public class RecordFactsTool implements AgentTool {
                     .append(" 条的 dimension 未精确命中覆盖目标、但与其近似（")
                     .append(String.join("、", offDimension))
                     .append("）——若这正是目标数据，请照抄覆盖目标的 dimension 字符串重新入账（同 key 覆盖旧值），否则终答覆盖闸门将报缺口");
+        }
+        if (!appendWarnings.isEmpty()) {
+            sb.append("\n注意: ").append(appendWarnings.size())
+                    .append(" 条会作为新增口径并存而非覆盖旧口径（")
+                    .append(String.join("；", appendWarnings))
+                    .append("）。若目的是覆盖更新，必须完全复用旧条目的 dimension/period/metric；")
+                    .append("若确为新口径，请在 note 说明与旧口径的关系，避免终答误用旧值");
         }
         return sb.append('\n').append(facts.coverageLine()).toString();
     }
