@@ -46,9 +46,9 @@ public class LoadSkillTool implements AgentTool {
         skills.set(skill);
         StringBuilder out = new StringBuilder(skill.instructions());
         if (!skill.files().isEmpty()) {
-            out.append("\n\n本技能附带的文件（不必全部读取，需要时用 read_file 按需读取，路径相对根目录）：\n");
+            out.append("\n\n本技能附带的文件（不必全部读取，需要时用 read_file 按需读取；以下 skill:// 地址不受 storage root 影响）：\n");
             for (String f : skill.files()) {
-                out.append("- ").append(skill.dir()).append('/').append(f).append('\n');
+                out.append("- skill://").append(skill.name()).append('/').append(f).append('\n');
             }
         }
         out.append("\n技能 ").append(skill.name()).append(" 的工作流程已加载，请严格按上述流程执行本次任务；")

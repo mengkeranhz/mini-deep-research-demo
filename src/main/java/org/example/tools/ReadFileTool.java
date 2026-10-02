@@ -5,6 +5,7 @@ import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.example.Config;
+import org.example.SkillRegistry;
 import org.example.ToolDef;
 import org.example.ToolRegistry;
 import org.example.ToolRegistry.AgentTool;
@@ -39,7 +40,7 @@ public class ReadFileTool implements AgentTool {
                         + "文件较长时可多次调用翻页阅读；提供 keywords 时改为按段落检索，返回命中关键词的完整段落。",
                 Map.of("type", "object",
                         "properties", Map.of(
-                                "path", Map.of("type", "string", "description", "文件路径（相对路径相对于根目录解析）"),
+                                "path", Map.of("type", "string", "description", "文件路径。普通相对路径相对当前 storage root；Skill 附件用 skill://<skill-name>/<relative-path>，不受 storage root 影响"),
                                 "offset", Map.of("type", "integer", "description", "起始行号（0 起），默认 0"),
                                 "limit", Map.of("type", "integer", "description", "返回行数，默认 200"),
                                 "keywords", Map.of("type", "array",
@@ -53,7 +54,13 @@ public class ReadFileTool implements AgentTool {
     @Override
     public String execute(JsonNode input) throws Exception {
         String path = ToolRegistry.str(input, "path");
-        List<String> lines = readAllLines(resolve(path));
+        Path file = resolve(path);
+        if (!Files.isRegularFile(file)) {
+            throw new IllegalArgumentException("文件不存在: " + path
+                    + "（实际解析: " + file + "；普通相对路径 root=" + root
+                    + "。Skill 附件请使用 skill://<skill-name>/<relative-path>）");
+        }
+        List<String> lines = readAllLines(file);
 
         List<String> keywords = input.hasNonNull("keywords")
                 ? ToolRegistry.strList(input, "keywords").stream().filter(k -> !k.isBlank()).toList()
@@ -131,6 +138,9 @@ public class ReadFileTool implements AgentTool {
 
     /** 相对路径相对于根目录解析，绝对路径原样使用。 */
     private Path resolve(String path) {
+        if (path.startsWith("skill://")) {
+            return SkillRegistry.skillResource(path);
+        }
         Path p = Path.of(path);
         return p.isAbsolute() ? p.normalize() : root.resolve(p).normalize();
     }

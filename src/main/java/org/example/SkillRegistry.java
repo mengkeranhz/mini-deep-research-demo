@@ -57,6 +57,37 @@ public final class SkillRegistry {
                 .or(() -> SKILLS.stream().filter(s -> normalize(s.name()).equals(normalize(q))).findFirst());
     }
 
+    /**
+     * 解析 skill://<skill-name>/<relative-path> 到技能源目录中的附件。
+     * Skill 附件不属于某个 Agent 的 storage workspace，不能用 storage.root-dir 解析；
+     * 该地址始终相对 SkillRegistry 扫描到的技能源目录，父/子 Agent 环境一致。
+     */
+    public static Path skillResource(String location) {
+        if (location == null || !location.startsWith("skill://")) {
+            throw new IllegalArgumentException("非法 skill:// 地址: " + location);
+        }
+        String rest = location.substring("skill://".length());
+        int slash = rest.indexOf('/');
+        if (slash <= 0 || slash == rest.length() - 1) {
+            throw new IllegalArgumentException("skill:// 地址应为 skill://<skill-name>/<relative-path>: " + location);
+        }
+        String skillName = rest.substring(0, slash);
+        String relative = rest.substring(slash + 1);
+        Skill skill = find(skillName)
+                .orElseThrow(() -> new IllegalArgumentException("skill:// 地址中的技能不存在: " + location
+                        + "；可用技能: " + String.join("、", names())));
+        Path file = Config.rootDir(null)
+                .resolve(skill.dir())
+                .resolve(relative)
+                .toAbsolutePath().normalize();
+        Path skillRoot = Config.rootDir(null).resolve(skill.dir()).toAbsolutePath().normalize();
+        if (!file.startsWith(skillRoot) || !Files.isRegularFile(file)) {
+            throw new IllegalArgumentException("Skill 附件不存在或越界: " + location
+                    + "（实际解析: " + file + "）");
+        }
+        return file;
+    }
+
     /** 名称归一化：小写、连续下划线/空白折算为连字符——化解 _ 与 - 的手滑变体。 */
     private static String normalize(String s) {
         return s.strip().toLowerCase().replaceAll("[_\\s]+", "-");
@@ -154,8 +185,8 @@ public final class SkillRegistry {
             return files.filter(Files::isRegularFile)
                     .filter(json::matches)
                     .sorted()
-                    .map(file -> SkillSchema.load(file, SKILLS_DIR + "/"
-                            + dir.getFileName() + "/" + dir.relativize(file)))
+                    .map(file -> SkillSchema.load(file,
+                            "skill://" + dir.getFileName() + "/" + dir.relativize(file)))
                     .toList();
         } catch (IOException e) {
             throw new IllegalStateException("读取技能断言目录失败: " + folder + ": " + e.getMessage(), e);

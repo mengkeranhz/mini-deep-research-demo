@@ -117,18 +117,21 @@ record_facts 入账——里程、耗时、价格、时刻与任何断言同等�
 ### 4. 时间预算
 
 - 每天时间账 = 交通 + 游览 + 排队（旺季口径）+ 用餐 + 休整 + 缓冲。缓冲须显式：单列一行写时长与用途，计入当日总量；无时长无用途的"缓冲"按留白处理（终检口径见第 9 节）。
-- **领域数据账本**：`schemas/travel-fact.schema.json` 定义地点、路线、锚点、时长预算、约束、风险、
-  行程快照等结构化事实。关键领域事实优先用 `record_facts.payload` 入账，并在 `schema` 中声明
-  `urn:mini-deep-research:travel-planner:travel-fact:v1` 或其 `$defs` 引用；未覆盖字段放入 `extensions`。
+- **领域数据账本**：`skill://travel-planner/schemas/travel-fact.schema.json` 定义地点、路线、锚点、
+  时长预算、约束、风险、行程快照等结构化事实。关键领域事实优先用 `record_facts.payload` 入账；
+  `schema` 通常指向具体子结构，如 `urn:mini-deep-research:travel-planner:travel-fact:v1#/$defs/route`、
+  `#/$defs/anchor`、`#/$defs/duration_budget`、`#/$defs/constraint`、`#/$defs/risk`；
+  根 Schema 仅当 payload 本身就是完整 travel-fact envelope 时使用。未覆盖字段放入 `extensions`。
 - **机器可读行程产物**：排程定稿后用 `run_code` 生成 `data/itinerary.json`，结构遵循
-  `schemas/itinerary.schema.json`（`$id=urn:mini-deep-research:travel-planner:itinerary:v1`）。
+  `skill://travel-planner/schemas/itinerary.schema.json`
+  （`$id=urn:mini-deep-research:travel-planner:itinerary:v1`）。
   Markdown 仍是用户交付物；该 JSON 用于终检、后续修改和多版本对比，生成后将其路径与版本名入账。
 - **时长预算也是事实**：早餐、退房装车、加油、取还车、入住、正餐、休整、停车检票等支撑动作，必须按
   `duration_budget` 记录 `subject / context / normal / compressed / minimum / preconditions / evidence`。
   数值从用户语境、行程强度、住宿形态、现场约束或来源推导；无法核实则 status=proxy 并写推导理由，
   不得把某个固定分钟数当成普适答案。
 - **现实动作预算库**：本 Agent 运行期间只需读取一次
-  `skills/travel-planner/reference/duration-budgets.json`，并将选用的预算入账；后续排程沿用该账本结果，
+  `skill://travel-planner/reference/duration-budgets.json`，并将选用的预算入账；后续排程沿用该账本结果，
   不得每日或每版本重复读取同一文件。读取后按其中的 `subject + context` 选择预算。
   该库是领域默认假设，不是普适硬规则；覆盖优先级为：用户明确约束 > 已核实现场事实 > context 默认预算 >
   模型推导。若用户或现场事实覆盖默认值，必须记录覆盖理由与新的前置条件。

@@ -212,10 +212,12 @@ public class DelegateAgentTool implements ToolRegistry.AgentTool {
                 2. 每得到关键数据立即 record_facts，含数值、时期、口径、来源与状态。
                 3. 不向用户提问；信息不足时明确假设，或用 status=not_found 写明已尝试方式。
                 4. 不要扩展到父任务全貌，也不要假设兄弟子任务结论。
-                5. 若指定唯一方案版本，最终报告必须仅覆盖该版本的完整计划、数据、预算与风险。
-                6. 若指定唯一方案版本，最终报告还必须包含版本决策账本：契约标明的决策变量、
+                5. 工具路径读取失败只表示该路径解析失败，不得推断 Skill、Schema 或工具能力不存在；
+                   Skill 附件一律优先使用 skill://<skill-name>/<relative-path>。
+                6. 若指定唯一方案版本，最终报告必须仅覆盖该版本的完整计划、数据、预算与风险。
+                7. 若指定唯一方案版本，最终报告还必须包含版本决策账本：契约标明的决策变量、
                    已选方案、被拒替代方案和版本差异证据，并按 required_facts 入账。
-                7. 完成时必须调用 final_answer 提交完整子任务报告。
+                8. 完成时必须调用 final_answer 提交完整子任务报告。
                 """);
         return request.toString();
     }

@@ -69,7 +69,7 @@ public class RecordFactsTool implements AgentTool {
                                                         "critical", Map.of("type", "boolean",
                                                                 "description", "该事实是否为方案成立的关键依赖。非 found 的关键依赖必须在 note 写「保守主方案：」与「升级条件：」"),
                                                         "schema", Map.of("type", "string",
-                                                                "description", "payload 使用的技能数据结构引用：$id 或 $id#/$defs/<定义名>；仅当传 payload 时必填"),
+                                                                "description", "payload 使用的技能数据结构引用。优先用 $id#/$defs/<定义名> 指向具体对象；根 $id 仅当 payload 本身是完整 envelope；仅当传 payload 时必填"),
                                                         "payload", Map.of("type", "object",
                                                                 "description", "结构化领域事实对象。按已加载 Skill 的 JSON Schema 组织；未覆盖字段放入 payload.extensions；不要与 value/note 大段重复")),
                                                 "required", List.of("dimension", "period", "status")))),
@@ -122,6 +122,11 @@ public class RecordFactsTool implements AgentTool {
                 }
                 Skill currentSkill = skills.get();
                 List<String> validationErrors = SkillSchema.validate(payloadSchema, payload, currentSkill.schemas());
+                if (!validationErrors.isEmpty() && currentSkill.schemas().stream()
+                        .anyMatch(s -> s.id().equals(payloadSchema))) {
+                    validationErrors = new ArrayList<>(validationErrors);
+                    validationErrors.addFirst("引用了根 Schema；record_facts 外层已有 dimension/period/status 时，payload 通常应改用该 Schema 的 #/$defs/<定义名>");
+                }
                 if (!validationErrors.isEmpty()) {
                     rejected.add("[" + dimension + "@" + period + "] payload 不符合 schema "
                             + payloadSchema + ": " + String.join("; ", validationErrors));
