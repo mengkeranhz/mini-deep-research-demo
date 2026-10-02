@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * record_facts：把检索到的关键数据写入事实账本（维度×时期×口径 → 值/来源/状态）。
@@ -120,16 +121,18 @@ public class RecordFactsTool implements AgentTool {
                     rejected.add("[" + dimension + "@" + period + "] " + schemaError);
                     continue;
                 }
+                SkillSchema declared = declaredSchema(payloadSchema);
+                String badFragment = missingFragmentError(payloadSchema, declared);
+                if (badFragment != null) {
+                    rejected.add("[" + dimension + "@" + period + "] " + badFragment);
+                    continue;
+                }
                 Skill currentSkill = skills.get();
                 List<String> validationErrors = SkillSchema.validate(payloadSchema, payload, currentSkill.schemas());
-                if (!validationErrors.isEmpty() && currentSkill.schemas().stream()
-                        .anyMatch(s -> s.id().equals(payloadSchema))) {
-                    validationErrors = new ArrayList<>(validationErrors);
-                    validationErrors.addFirst("引用了根 Schema；record_facts 外层已有 dimension/period/status 时，payload 通常应改用该 Schema 的 #/$defs/<定义名>");
-                }
                 if (!validationErrors.isEmpty()) {
                     rejected.add("[" + dimension + "@" + period + "] payload 不符合 schema "
-                            + payloadSchema + ": " + String.join("; ", validationErrors));
+                            + payloadSchema + ": " + String.join("; ", validationErrors)
+                            + "; " + repairHint(payloadSchema, declared));
                     continue;
                 }
                 try {
@@ -204,8 +207,104 @@ public class RecordFactsTool implements AgentTool {
         if (skill == null) {
             return "尚未加载 Skill，不能使用 payload";
         }
-        boolean supported = skill.schemas().stream().anyMatch(s -> s.supports(schema));
-        return supported ? null : "schema 引用未在当前 Skill 的 schemas/*.json 中声明: " + schema;
+        if (skill.schemas().stream().anyMatch(s -> s.supports(schema))) {
+            return null;
+        }
+        String declared = skill.schemas().stream().map(SkillSchema::id).collect(Collectors.joining("、"));
+        return "schema 引用未在当前 Skill 的 schemas/*.json 中声明: " + schema
+                + ";可声明的引用: " + declared;
+    }
+
+    /** 按 supports 语义定位 payload 引用声明的 Schema（调用前已通过 schemaError 确认存在）。 */
+    private SkillSchema declaredSchema(String schemaRef) {
+        return skills.get().schemas().stream()
+                .filter(s -> s.supports(schemaRef)).findFirst().orElse(null);
+    }
+
+    /**
+     * 子定义引用存在性自查。SkillSchema.resolve 对不存在的 #/$defs/&lt;名&gt; 返回 MissingNode、
+     * validateNode 随即跳过校验——拼错的定义名会静默通过校验；这里先把拼错拦下并给出可用清单。
+     */
+    private static String missingFragmentError(String schemaRef, SkillSchema schema) {
+        if (schema == null) {
+            return null;
+        }
+        int hash = schemaRef.indexOf('#');
+        if (hash < 0 || !schemaRef.substring(hash).startsWith("#/")) {
+            return null;
+        }
+        JsonNode def = resolveFragment(schema, schemaRef.substring(hash));
+        if (!def.isMissingNode()) {
+            return null;
+        }
+        String defs = defsCatalog(schema);
+        return "schema 引用了不存在的子定义 " + schemaRef.substring(hash)
+                + (defs.isEmpty() ? "（该 Schema 无 $defs，引用根 $id 即可）" : ";可用子定义: " + defs);
+    }
+
+    /**
+     * 校验失败的修复路径——错误信息必须可直接照抄，否则模型会放弃 payload、
+     * 退化为纯 value/note 文本入账（领域结构随之丢失）：
+     * 根引用 → 给出子定义清单及各自 required，或无子定义时指引原样搬运完整 envelope；
+     * 子定义引用 → 给出该定义的 required 与 Schema 文件路径，供补齐字段或 read_file 核对。
+     */
+    private static String repairHint(String schemaRef, SkillSchema schema) {
+        if (schema == null) {
+            return "请核对 schema 引用后重发本条 payload，不要退化为纯 value/note 文本入账";
+        }
+        StringBuilder sb = new StringBuilder("修复路径: ");
+        int hash = schemaRef.indexOf('#');
+        String fragment = hash < 0 ? "" : schemaRef.substring(hash);
+        if (fragment.isEmpty() || "#".equals(fragment)) {
+            String defs = defsCatalog(schema);
+            if (defs.isEmpty()) {
+                sb.append("该 Schema 无子定义，payload 须为其完整 envelope——从技能数据文件原样搬运对应结构、")
+                        .append("补齐根字段（").append(requiredList(schema.root())).append("）与上述缺失字段，不要手工精简字段");
+            } else {
+                sb.append("外层已有 dimension/period/status 时，payload 通常应改用子定义引用、只传该子对象；可用子定义: ")
+                        .append(defs);
+            }
+        } else {
+            sb.append("按 ").append(fragment).append(" 的 ").append(requiredList(resolveFragment(schema, fragment)))
+                    .append("补齐上述缺失字段，不要手工精简字段");
+        }
+        return sb.append(";完整定义可 read_file ").append(schema.source())
+                .append(";修复后重发本条 payload，不要退化为纯 value/note 文本入账").toString();
+    }
+
+    /** 子定义目录："#/$defs/名(required: a, b)" 列表，供错误信息直接照抄。 */
+    private static String defsCatalog(SkillSchema schema) {
+        JsonNode defs = schema.root().path("$defs");
+        if (!defs.isObject() || defs.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        defs.fields().forEachRemaining(e -> {
+            if (sb.length() > 0) {
+                sb.append("、");
+            }
+            sb.append("#/$defs/").append(e.getKey()).append("（").append(requiredList(e.getValue())).append("）");
+        });
+        return sb.toString();
+    }
+
+    private static String requiredList(JsonNode def) {
+        JsonNode required = def == null ? null : def.path("required");
+        if (required == null || !required.isArray() || required.isEmpty()) {
+            return "无必填字段";
+        }
+        List<String> names = new ArrayList<>();
+        required.forEach(k -> names.add(k.asText()));
+        return "required: " + String.join(", ", names);
+    }
+
+    /** 与 SkillSchema.resolve 同语义的 fragment 路径解析（含 ~0/~1 转义）。 */
+    private static JsonNode resolveFragment(SkillSchema schema, String fragment) {
+        JsonNode cur = schema.root();
+        for (String part : fragment.substring(2).split("/")) {
+            cur = cur.path(part.replace("~1", "/").replace("~0", "~"));
+        }
+        return cur;
     }
 
     /** 状态归一：空白默认 found（大多数入账是刚检索到的可用数据）。 */
