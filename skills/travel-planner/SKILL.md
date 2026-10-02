@@ -118,10 +118,12 @@ record_facts 入账——里程、耗时、价格、时刻与任何断言同等�
 
 - 每天时间账 = 交通 + 游览 + 排队（旺季口径）+ 用餐 + 休整 + 缓冲。缓冲须显式：单列一行写时长与用途，计入当日总量；无时长无用途的"缓冲"按留白处理（终检口径见第 9 节）。
 - **领域数据账本**：`skill://travel-planner/schemas/travel-fact.schema.json` 定义地点、路线、锚点、
-  时长预算、约束、风险、行程快照等结构化事实。关键领域事实优先用 `record_facts.payload` 入账；
-  `schema` 通常指向具体子结构，如 `urn:mini-deep-research:travel-planner:travel-fact:v1#/$defs/route`、
+  时长预算、约束、风险、行程快照等结构化事实。属于这些领域对象的事实必须以 `record_facts.payload` 入账，
+  `schema` 指向具体子结构，如 `urn:mini-deep-research:travel-planner:travel-fact:v1#/$defs/route`、
   `#/$defs/anchor`、`#/$defs/duration_budget`、`#/$defs/constraint`、`#/$defs/risk`；
   根 Schema 仅当 payload 本身就是完整 travel-fact envelope 时使用。未覆盖字段放入 `extensions`。
+  构造 payload 前先 read_file 对应 schema；校验被拒时按工具回执给出的修复路径补齐后重发本条，
+  不得退化为纯 value/note 文本入账。
 - **机器可读行程产物**：排程定稿后用 `run_code` 生成 `data/itinerary.json`，结构遵循
   `skill://travel-planner/schemas/itinerary.schema.json`
   （`$id=urn:mini-deep-research:travel-planner:itinerary:v1`）。
@@ -204,7 +206,8 @@ record_facts 入账——里程、耗时、价格、时刻与任何断言同等�
 - 推荐层逐项点名：必须出现在每日时刻表、取舍说明、避雷之一；取舍说明含净增数据；顺路安全点须在对应路段备注"安全区短停"或"不经过原因"；因总天数锁死被砍时，取舍说明须含总天数不变的置换方案（可压缩日+砍哪些项+代价），否则不合格。
 - 时刻表格式闸门：按输出第 2 节逐行核对——时间为区间、一行一动作、长驾日休整单列成行（见第 4 节）、用餐标注性质；交通行的安排须同时具备起点和终点，里程·耗时须同时具备里程与耗时，不可遗漏或编造。
 - **领域数据对账闸门**：终答前核对行程中的地点、路线、锚点、约束、风险和支撑动作时长预算是否已按
-  `travel-fact.schema.json` 入账；`itinerary.schema.json` 产物与 Markdown 时刻表的日期、事件顺序、
+  `travel-fact.schema.json` 以 payload+schema（`$id#/$defs/<定义名>`）结构化入账——仅有 value/note
+  文本的领域事实条目须先补结构化入账再过闸；`itinerary.schema.json` 产物与 Markdown 时刻表的日期、事件顺序、
   交通方式和时长必须一致。发现支撑动作低于其入账预算、缺少前置条件或时间轴被挤压时，重排行程或补足依据，
   不得只改 Markdown 数字。
 - **现实动作预算闸门**：逐个核对 meal / lodging / fueling / ticketing / preparation / rest 等事件。
